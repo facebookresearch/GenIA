@@ -1,0 +1,319 @@
+<!DOCTYPE html>
+<!-- Copyright (c) Meta Platforms, Inc. and affiliates. -->
+
+<html lang="en" data-theme="light">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- <meta name="robots" content="noindex, nofollow"> -->
+<title>GenIA: Generative Reconstruction with Test-Time Input Alignment</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22%3E%3Ctext y=%22.9em%22 font-size=%2290%22%3E%F0%9F%90%A2%3C/text%3E%3C/svg%3E">
+<!-- No CDN, no web fonts, no analytics: code, styles and fonts are all local.
+     The only other host is the media, loaded from Google Cloud Storage
+     (`assetBase` in data.js; see js/app.js and upload_assets.py). -->
+<!-- Always light for now: data-theme="light" on <html> overrides the system
+     preference, and the saved-choice script below is off. To re-enable dark
+     mode: drop data-theme from <html>, set color-scheme to "light dark",
+     restore the script, and call wireThemeToggle() in js/app.js. -->
+<meta name="color-scheme" content="light">
+<!-- <script>try { var t = localStorage.getItem('genia-theme'); if (t === 'dark' || t === 'light') document.documentElement.setAttribute('data-theme', t); } catch (e) {}</script> -->
+<link rel="stylesheet" href="css/app.css">
+</head>
+<body>
+
+<!-- ====================================================================== -->
+<!-- Sticky section nav. Smooth scrolling is CSS (scroll-behavior on <html>); -->
+<!-- js/app.js only lights up the link for the section you are in.            -->
+<!-- ====================================================================== -->
+<nav class="navbar" id="navbar">
+  <div class="navbar-inner">
+    <a class="navbar-brand" href="#top"><span class="title-brand">GenIA</span></a>
+    <ul class="navbar-links">
+      <li><a href="#abstract">Abstract</a></li>
+      <li><a href="#gallery3d-sec">Gallery</a></li>
+      <li><a href="#method">Method</a></li>
+      <li><a href="#completion-sec">Completion</a></li>
+      <li><a href="#comparisons-sec">Comparisons</a></li>
+      <li><a href="#quantitative">Tables</a></li>
+      <li><a href="#runtime-sec">Runtime</a></li>
+      <li><a href="#ablations">Ablations</a></li>
+      <li><a href="#limitations-sec">Limits</a></li>
+      <li><a href="qualitative.html">More results &rarr;</a></li>
+      <li><a href="ablations.html">More ablations &rarr;</a></li>
+      <li><a href="#bibtex-section">BibTeX</a></li>
+    </ul>
+  </div>
+</nav>
+
+<!-- ====================================================================== -->
+<!-- Header                                                                  -->
+<!-- ====================================================================== -->
+<header class="hero page" id="top">
+  <h1 class="title">
+    <span class="title-brand">GenIA</span>: Generative Reconstruction<br>with Test-Time Input Alignment
+  </h1>
+  <p class="authors">
+    <span><a href="https://s-esposito.github.io">Stefano Esposito</a><sup>1</sup></span>
+    <span><a href="https://naamapearl.github.io/">Naama Pearl</a><sup>1</sup></span>
+    <span><a href="https://poliik.github.io/">Polina Karpikova</a><sup>1</sup></span>
+    <span><a href="https://scholar.google.com/citations?user=484sccEAAAAJ&amp;hl=it">Samuel Rota Bul&ograve;</a><sup>2</sup></span>
+    <br>
+    <span><a href="https://scholar.google.it/citations?user=vW1gaVEAAAAJ&amp;hl=it">Lorenzo Porzi</a><sup>2</sup></span>
+    <span><a href="https://scholar.google.co.uk/citations?user=CxbDDRMAAAAJ&amp;hl=en">Peter Kontschieder</a><sup>2</sup></span>
+    <span><a href="https://www.cvlibs.net/">Andreas Geiger</a><sup>1</sup></span>
+    <span><a href="https://scholar.google.com/citations?user=XpOqG0cAAAAJ&amp;hl=en">Jonathon Luiten</a><sup>2</sup></span>
+  </p>
+  <p class="affiliations">
+    <span><sup>1</sup>T&uuml;bingen AI Center, University of T&uuml;bingen, Germany</span>
+    <span><sup>2</sup>Meta Reality Labs</span>
+  </p>
+
+  <ul class="links" id="links">
+    <!-- populated from PAGE_DATA.links (data.js) -->
+  </ul>
+</header>
+
+<main class="page">
+
+  <!-- ==================================================================== -->
+  <!-- Teaser                                                                -->
+  <!-- ==================================================================== -->
+  <section>
+    <div id="teaser"></div>
+    <p class="small muted center"><strong>Click</strong> on images to open at full resolution.</p>
+    <p class="section-blurb">
+      <strong>GenIA reconstructs complete, detailed, and input-aligned 3D
+      objects from monocular images, multi-view images, and monocular
+      videos.</strong> Our inference-time framework aligns the frozen SAM3D
+      model to the inputs with geometric and photometric constraints,
+      extending it beyond its single-view static training setting to
+      multi-view and dynamic reconstruction. Rows: ours, a baseline (badged),
+      and the input observations. Hover a tile to magnify the same point in
+      all three.
+    </p>
+  </section>
+
+  <hr class="rule">
+
+  <!-- ==================================================================== -->
+  <!-- Abstract                                                              -->
+  <!-- ==================================================================== -->
+  <section class="column" id="abstract">
+    <h2 class="section-title">Abstract</h2>
+    <p class="justify">
+      Reconstructing complete 3D object assets from monocular or sparse
+      multi-view observations remains challenging. Generative 3D foundation
+      models can complete object geometry beyond the observed views, but their
+      predictions may not faithfully reproduce the observed geometry,
+      appearance, or pose. We introduce GenIA, a framework for test-time
+      input-aligned generation that grounds SAM3D's generative prior in
+      geometric and photometric observations without retraining the foundation
+      model.
+    </p>
+    <p class="justify">
+      We improve object pose by deriving translation and scale from geometry
+      while retaining the learned rotation prior, and align appearance through
+      visibility-biased attention, cross-observation fusion, and differentiable
+      rendering guidance during denoising. An optional post-denoising
+      refinement further adapts the appearance latent, lightweight decoder
+      adapters, and object placement to the observations. Our framework also
+      supports externally supplied geometry; when given temporal shapes of
+      dynamic objects, it recovers a shared, input-aligned canonical appearance
+      and stable world-space placement. Across synthetic and real benchmarks,
+      GenIA improves pose prediction and object reconstruction from monocular,
+      multi-view, and dynamic inputs, outperforming recent optimization-based,
+      per-frame image-to-3D, and video-to-4D methods.
+    </p>
+  </section>
+
+  <hr class="rule">
+
+  <!-- ==================================================================== -->
+  <!-- 3D gallery  (built by js/app.js from data.js; see mountGallery3d)     -->
+  <!-- ==================================================================== -->
+  <section id="gallery3d-sec">
+    <h2 class="section-title">3D Gallery</h2>
+    <div id="gallery3d"></div>
+    <p class="small muted center">
+      Pick a scene by its input views, then load its interactive 3D
+      reconstruction: the input cameras and the reconstructed objects. Drag to orbit,
+      scroll to zoom, right-drag to pan, <strong>R</strong> to reset the view,
+      and <strong>E</strong> to cycle between splats, ellipsoids and points.
+    </p>
+  </section>
+
+  <hr class="rule">
+
+  <!-- ==================================================================== -->
+  <!-- Method                                                                -->
+  <!-- ==================================================================== -->
+  <section id="method">
+    <h2 class="section-title">Method</h2>
+    <p class="section-blurb">
+      An inference-time framework: no retraining. All four stages run per
+      scene on the frozen SAM3D model. Test-time refinement optimizes
+      the appearance latent, a low-rank decoder adapter, and the object
+      placement.
+    </p>
+    <div id="pipeline"></div>
+    <p class="section-blurb">
+      We (1)&nbsp;obtain the coarse shape from SAM3D’s first pass or (optionally) inject an external
+      one into SAM3D’s shape tokens, (2)&nbsp;denoise each object’s per-frame pose over that fixed shape, (3)&nbsp;predict observation-aligned
+      appearance as SLAT features, and (4)&nbsp;do test-time refinement of reconstruction against the input views. Dotted
+      arrows denote gradient flow. We illustrate the single-view setting; multi-view and dynamic extensions are described in the paper.
+    </p>
+  </section>
+
+  <hr class="rule">
+
+  <!-- ==================================================================== -->
+  <!-- Completion figure  (panels mounted by js/app.js from data.js)         -->
+  <!-- ==================================================================== -->
+  <section id="completion-sec">
+    <h2 class="section-title">Completion of unobserved regions</h2>
+    <div id="completion"></div>
+    <p class="small muted center"><strong>Drag</strong> the render to rotate the object; the method
+      buttons switch reconstructions while keeping the viewing angle.</p>
+    <p class="section-blurb">
+      A real object reconstructed from a single photograph. SAM3D's completion
+      looks smooth and synthetic; TripoSplat and CUPID match the observed side
+      but wash out or drift on the unobserved surface. GenIA with TTR
+      completes it with colors consistent with the input.
+    </p>
+  </section>
+
+  <hr class="rule">
+
+  <!-- ==================================================================== -->
+  <!-- Qualitative comparisons  (built by js/app.js from data.js)            -->
+  <!-- ==================================================================== -->
+  <section id="comparisons-sec">
+    <h2 class="section-title">Qualitative comparisons</h2>
+    <p class="section-blurb">
+      For each scene we compare: ours without test-time refinement,
+      ours with it, and a baseline. The supplementary's
+      static all-methods-at-once figures are on their own page:
+      <a href="qualitative.html">additional qualitative results</a>.
+    </p>
+    <p class="small muted center">
+      <strong>Views</strong> picks the
+      input-view count, <strong>Baseline</strong> which method to compare against. The arrows change scenes.
+    </p>
+    
+    <div id="comparisons"></div>
+  </section>
+
+  <!-- ==================================================================== -->
+  <!-- Quantitative results  (built by js/app.js from tables.js)             -->
+  <!-- ==================================================================== -->
+  <section id="quantitative">
+    <h2 class="section-title">Quantitative results</h2>
+    <p class="section-blurb">
+      PSNR is foreground-masked on training views; LPIPS and CLIP-I are
+      held-out, and co-PSNR restricts held-out pixels to those visible from an
+      input view. For fairness, every method's pose is refined against the
+      inputs with shape and appearance fixed; per-scene optimization methods
+      are exempt.
+    </p>
+    <div id="tables-results"></div>
+  </section>
+
+  <hr class="rule">
+
+  <!-- ==================================================================== -->
+  <!-- Runtime vs quality  (image mounted by js/app.js from data.js)         -->
+  <!-- ==================================================================== -->
+  <section id="runtime-sec">
+    <h2 class="section-title">Runtime vs. quality</h2>
+    <div id="runtime"></div>
+    <p class="section-blurb">
+      <strong>GenIA adds minimal overhead over SAM3D.</strong> Median runtime
+      (log axis, as a multiple of SAM3D's 25.3&thinsp;s on an A100) versus
+      mean held-out CLIP-I; the static panels score on CO3D, the dynamic panel
+      on DAVIS with ActionMesh included in our runtime. TRELLISv2 and Pixal3D
+      appear as dashed rules: cost only, no asserted quality. On dynamic
+      sequences GenIA costs 13&times; SAM3D's single-image runtime including
+      ActionMesh (12&times; without TTR), versus 160&times; for Lift4D and
+      250&times; for HiMoR, and with TTR achieves the highest CLIP-I.
+    </p>
+  </section>
+
+  <hr class="rule">
+
+  <!-- ==================================================================== -->
+  <!-- Ablations  (built by js/app.js from tables.js)                        -->
+  <!-- ==================================================================== -->
+  <section id="ablations">
+    <h2 class="section-title">Ablations</h2>
+    <p class="section-blurb">
+      Each row is cumulative, as described in the paper. The
+      supplementary's full appearance ladders, on every benchmark, are on their
+      own page: <a href="ablations.html">appearance ablations</a>.
+    </p>
+    <div id="appearance"></div>
+    <p class="section-blurb">
+      <strong>Our appearance prediction better aligns with the input
+      observations.</strong> One GSO object from a single view: attention bias
+      injects pose into SAM3D's pose-blind appearance predictor, rendering
+      guidance improves color and detail matching, and optional TTR adds
+      further gains, including on the held-out view. Rows: one training and
+      one held-out view.
+    </p>
+    <p class="small muted center">
+      <strong>Hover</strong> a tile to magnify the same point across stacked contributions.
+    </p>
+    
+    <div id="tables-ablations"></div>
+  </section>
+
+  <hr class="rule">
+
+  <!-- ==================================================================== -->
+  <!-- Limitations and failure cases  (built by js/app.js from data.js)      -->
+  <!-- ==================================================================== -->
+  <section id="limitations-sec">
+    <h2 class="section-title">Limitations and failure cases</h2>
+    <p class="section-blurb">
+      Dynamic geometry currently relies on an external predictor
+      (ActionMesh) rather than being directly grounded in the observations.
+      Rotation stays prior-driven, corrected only by noise-sensitive
+      ICP registration. Both failure modes surface on dynamic scenes below:
+      incorrect world-space placement from registration, non-rigid
+      deformation errors inherited from ActionMesh, or a combination of the
+      two, can strongly impact the final reconstruction quality.
+    </p>
+    <div id="limitations"></div>
+  </section>
+
+  <hr class="rule">
+
+  <!-- ==================================================================== -->
+  <!-- BibTeX — arXiv entry (arXiv:2610.12388). The Copy button is wired by  -->
+  <!-- wireCopy() in app.js.                                                  -->
+  <!-- ==================================================================== -->
+  <section class="column" id="bibtex-section">
+    <h2 class="section-title">BibTeX</h2>
+    <p class="center small">
+      <button type="button" class="chip" id="copy-bibtex">Copy</button>
+    </p>
+<pre class="bibtex" id="bibtex">@article{esposito2026genia,
+  title   = {GenIA: Generative Reconstruction with Test-Time Input Alignment},
+  author  = {Esposito, Stefano and Pearl, Naama and Karpikova, Polina and
+             Rota Bul{\`o}, Samuel and Porzi, Lorenzo and Kontschieder, Peter and
+             Geiger, Andreas and Luiten, Jonathon},
+  journal = {arXiv preprint arXiv:2610.12388},
+  year    = {2026}
+}</pre>
+  </section>
+
+  <footer class="page-footer column">
+    <!-- empty for now; the footer is hidden in css/app.css until it has content -->
+  </footer>
+
+</main>
+
+<script src="data.js"></script>
+<script src="tables.js"></script>
+<script src="js/app.js"></script>
+</body>
+</html>

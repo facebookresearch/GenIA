@@ -1,0 +1,166 @@
+<!DOCTYPE html>
+<!-- Copyright (c) Meta Platforms, Inc. and affiliates. -->
+
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GenIA — 3D viewer</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22%3E%3Ctext y=%22.9em%22 font-size=%2290%22%3E%F0%9F%90%A2%3C/text%3E%3C/svg%3E">
+<!-- A full-window 3DView (https://github.com/s-esposito/3DView,
+     a three.js + Spark viewer) that the main page's 3D gallery embeds in an
+     iframe (mountGallery3d in js/app.js); it also works standalone in a tab.
+
+     3DView's viewer bundle takes over the whole window and receives content
+     from a "host" through window.__viewerHost + window.postMessage (see
+     3DView's core/src/shared/messages.ts). This page is that host: when the
+     viewer reports `ready` it posts the assets named in the query string.
+
+       viewer3d.html?asset=<url>                  one splat / mesh / cloud
+       viewer3d.html?asset=<url>&asset=<url>...   several, as separate items
+       ...&group=temporal                         several, as the frames of one 4D item
+       ...&label=<text>                           Scene-panel name (default: file name)
+       ...&tracks=<url>                           plus 3D point tracks (.npz), their own item
+       ...&colmap=<dir>                           plus a COLMAP model, in the layout our
+                                                  pipeline exports: <dir>/sparse/000/*.bin
+                                                  and its images in <dir>/images/
+       ...&view=px,py,pz,tx,ty,tz                 starting viewpoint: camera at p looking at t,
+                                                  in the COLMAP frame (3DView's setView; a
+                                                  3DView without it ignores the message)
+
+     Presentation defaults: light theme on a white viewport, box / grid / axes /
+     COLMAP points off (a model shows only its camera frustums and images), and
+     the "3DView" display panel hidden. 3DView has no host option for these, so
+     they go through its own UI (see presentationDefaults below and the CSS).
+
+     The asset is fetched by the viewer, so a cross-origin URL (the GCS bucket)
+     needs CORS on that bucket. The bundle is loaded from 3DView's own GitHub
+     Pages deployment. -->
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #fff;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; }
+  /* The viewer appends its canvas to <body> and sizes it to the window. */
+  canvas { display: block; position: fixed; top: 0; left: 0; }
+  /* Status line the viewer writes into (looked up by id); same as 3DView's demo. */
+  #status { position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%);
+    max-width: min(560px, calc(100vw - 32px)); display: flex; align-items: center;
+    justify-content: center; text-align: center; padding: 12px 18px; color: #e6e6e6;
+    background: rgba(20, 20, 22, .72); -webkit-backdrop-filter: blur(12px) saturate(1.3);
+    backdrop-filter: blur(12px) saturate(1.3); border: 1px solid rgba(255, 255, 255, .12);
+    border-radius: 12px; box-shadow: 0 8px 28px rgba(0, 0, 0, .45); font-size: 13px;
+    line-height: 1.5; z-index: 100; pointer-events: none; }
+  /* Hide the "3DView" display panel (the first of the viewer's panels; it is
+     rebuilt on every change, so this has to be a stylesheet rule). The Scene
+     panel stays: it holds a 4D item's timeline. */
+  #viewer-ui > .viewer-panel:first-child { display: none; }
+  /* A white viewport (3DView's light theme is #e8e8e9), matching the page's
+     media tiles. The viewer reads this variable when the theme switches; the
+     extra `html` outranks its own rule, which it injects after this sheet. */
+  html body[data-viewer-theme="light"] { --vscode-editor-background: #fff; }
+</style>
+</head>
+<body>
+<div id="status">Loading viewer…</div>
+<script>
+(function () {
+  var VIEWER_BUNDLE = 'https://s-esposito.github.io/3DView/dist/webview.js';
+
+  var q = new URLSearchParams(location.search);
+  var assets = q.getAll('asset');
+  var group = q.get('group');   // 'temporal' | 'separate' | null (the viewer asks)
+  var label = q.get('label');
+  var colmap = q.get('colmap');
+  var tracks = q.get('tracks');
+  var view = (q.get('view') || '').split(',').map(Number);
+
+  function fileName(url) {
+    return decodeURIComponent(url.split(/[?#]/)[0].split('/').pop()) || url;
+  }
+  function addAsset(url, i) {
+    return { type: 'addAsset', id: 'asset-' + i, label: fileName(url),
+             asset: { uri: new URL(url, location.href).href, name: fileName(url) } };
+  }
+  function loadColmap(dir) {
+    var root = new URL(dir.replace(/\/*$/, '/'), location.href).href;
+    var model = root + 'sparse/000/';
+    return { type: 'loadColmap', id: 'colmap-0', label: 'Cameras', format: 'bin',
+             urls: { cameras: model + 'cameras.bin', images: model + 'images.bin',
+                     points3d: model + 'points3D.bin' },
+             imageBaseUrl: root + 'images' };
+  }
+  function assetMessage() {
+    if (assets.length === 1) {
+      var one = addAsset(assets[0], 0);
+      if (label) one.label = label;
+      return one;
+    }
+    var msg = { type: 'addGroup', id: 'group-0', label: label || assets.length + ' files',
+                members: assets.map(addAsset) };
+    if (group === 'temporal' || group === 'separate') msg.grouping = group;
+    return msg;
+  }
+
+  function post(m) { window.postMessage(m, '*'); }
+  function postAssets() {
+    post(assetMessage());
+    if (tracks) {
+      var t = addAsset(tracks, 0);
+      t.id = 'tracks-0';
+      t.label = '3D tracks';
+      post(t);
+    }
+  }
+  function whenSceneHasItem(fn) {
+    var t = setInterval(function () {
+      if (document.querySelector('#viewer-ui .viewer-scene-item')) { clearInterval(t); fn(); }
+    }, 100);
+  }
+
+  // The toggles go through their keyboard shortcuts, which flip them; the
+  // viewer keeps no saved state, so each starts on and one press turns it off.
+  // Run before the content arrives, which then adds itself with them off.
+  function presentationDefaults() {
+    var light = document.querySelector('#viewer-ui .viewer-seg-opt[aria-label="Light"]');
+    if (light) light.click();
+    ['b', 'g', 'a', 'p'].forEach(function (key) {
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: key }));
+    });
+  }
+
+  // Must exist before the bundle runs: it reads window.__viewerHost at startup.
+  // Only `ready` needs an answer; the Scene "+" menu (requestAdd) is not
+  // offered, since this host shows only what the page asked for.
+  window.__viewerHost = {
+    postMessage: function (msg) {
+      if (msg.type !== 'ready') return;
+      presentationDefaults();
+      // The home view may arrive before the content: the viewer keeps it.
+      if (view.length === 6 && view.every(isFinite)) {
+        post({ type: 'setView', position: view.slice(0, 3), target: view.slice(3) });
+      }
+      if (colmap) {
+        // Without a home view, 3DView fits the view to the scene's first item
+        // only, and an asset takes its place in the scene as soon as it is
+        // requested, before it loads. So the COLMAP model (cropped to frame
+        // the objects, see prepare_gallery3d.py) goes first, the assets once
+        // it is in.
+        post(loadColmap(colmap));
+        if (assets.length) whenSceneHasItem(postAssets);
+      } else if (assets.length) {
+        postAssets();
+      } else {
+        document.getElementById('status').textContent = 'Nothing to show: pass ?asset=<url> or ?colmap=<dir>';
+      }
+    }
+  };
+
+  var s = document.createElement('script');
+  s.src = VIEWER_BUNDLE;
+  s.onerror = function () {
+    document.getElementById('status').textContent = 'Could not load the 3D viewer (' + VIEWER_BUNDLE + ')';
+  };
+  document.body.appendChild(s);
+})();
+</script>
+</body>
+</html>
