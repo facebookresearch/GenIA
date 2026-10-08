@@ -41,7 +41,7 @@ transformers==4.57.6
 trimesh==4.10.1
 xatlas==0.0.9
 # lightning 2.3 imports pkg_resources, which setuptools>=81 no longer ships.
-setuptools==75.8.2
+setuptools==83.0.0
 # spconv / cumm runtime imports (install.sh installs them --no-deps).
 ccimport==0.4.4
 fire==0.7.1
