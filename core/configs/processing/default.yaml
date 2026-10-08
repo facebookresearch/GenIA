@@ -1,0 +1,23 @@
+# General processing flags shared across depth strategies.
+# Depth-strategy specifics live in processing/{moge,ground_truth,map_anything}.yaml.
+seed: 42
+add_background_gaussians: true   # Add background Gaussians from non-masked regions
+resume_from_cache: true          # Resume from .pt pipeline state checkpoints when available
+
+reconstruction_model: null   # No Sequence model; GT depth is loaded directly.
+
+# Reconstruction-backend flags. They live here rather than in a backend's own group so
+# a dotted override (e.g. processing.cache_reconstruction=true) composes against any
+# processing group.
+cache_reconstruction: false  # Reuse this scene's depth from {dataset.path}/{scene}/ma_cache (content-keyed)
+recon_resolution_set: 518    # Long side the backend is fed at (518 or 504); short side snaps to a fixed aspect ratio
+recon_on_test_views: true    # Also feed held-out test views to the model so their predicted cameras are available
+recon_mask_edges: true       # map-anything's normals+depth edge mask on predicted depth
+recon_confidence_min: null   # Drop map-anything pixels with conf <= this (1.01 = its 'guessing' floor); null = unused
+# Both need map_anything as well as a dataset that HAS the signal; either missing
+# raises at Sequence init rather than degrading.
+condition_recon_model_on_gt_poses: false   # requires GT poses
+condition_recon_model_on_gt_depths: false  # requires GT depth
+
+
+median_intrinsics: false

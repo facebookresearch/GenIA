@@ -1,0 +1,11 @@
+# Per-frame MoGe monocular depth estimation with predicted (identity) camera
+# poses. Datasets with GT poses should use processing=ground_truth (or set
+# camera_poses_source=gt) instead.
+defaults:
+  - default
+  - _self_
+
+reconstruction_model: moge
+depth_source: pred
+camera_poses_source: pred   # moge predicts no poses → identity
+median_intrinsics: true     # Average MoGe per-frame intrinsics across keyframes

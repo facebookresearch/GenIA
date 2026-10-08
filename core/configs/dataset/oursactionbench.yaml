@@ -1,0 +1,8 @@
+name: oursactionbench
+path: data/oursactionbench
+scene_name: 000-000_03b69da8d2c94b5999bcf2605ee2ecd9
+frame_index: null
+frame_stride: 1
+object_indices: null
+fps: 24
+downscale_factor: 1

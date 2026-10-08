@@ -1,0 +1,22 @@
+# Deformation-field warp evaluation knobs.
+#
+# Sampling-side knobs for the per-canonical-mesh-vertex deformation field
+# built by GT_SHAPES_INVERSION in any per-frame mode.  The field
+# lives on canonical mesh vertices, but consumers evaluate it at arbitrary
+# off-vertex points (decoded Gaussian centers, voxel-grid centers, mesh
+# primitive positions) via KNN+IDW interpolation + SO(3) blend.
+#
+# Shared across:
+#   - Stage-2 in-ODE rendering guidance (appearance_init=canonical_unified)
+#   - Stage-2 ODE-steps debug viz
+#   - Keyframes-video rendering across all pipeline blocks
+#   - FINAL's exports and renders
+
+knn_k: 4                # K nearest canonical mesh vertices per evaluation point
+                        # (ignored when the field has faces: support = the snapped face's 3 vertices)
+knn_eps: 1.0e-8         # IDW denominator floor
+knn_chunk_size: 131072  # eval-axis chunking for the IDW + rigid-LBS gather
+                        # (peak memory bound).  pytorch3d.ops.knn_points handles
+                        # its own internal tiling, so smaller values just pay
+                        # per-chunk launch overhead — 131072 keeps typical Stage-2
+                        # calls (P ≈ 100–200k) at 1–2 chunks.

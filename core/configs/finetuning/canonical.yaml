@@ -1,0 +1,104 @@
+enabled: true
+strategy: canonical
+num_iterations: 100
+token_lr: 0.0001
+optimize_tokens: true        # gate token optimization (false = freeze tokens)
+batch_size: 1                # frames per iteration (0 = all frames); 1-frame SGD noise regularises against overfit
+microbatch_size: 1           # 0 = disabled; micro-batch size for gradient accumulation
+decoder_autocast_bf16: true  # bf16 autocast on the in-loop decoder forward (outputs cast back to fp32); ~halves decoder-activation memory
+decoder_checkpoint: true     # gradient-checkpoint the in-loop decoder torso on very large objects (OOM guard)
+decoder_checkpoint_min_voxels: 30000  # only checkpoint objects with >= this many SLAT voxels (~2x decode cost, so small objects skip it); 30000 keeps FINETUNE under 40GB
+
+# LoRA decoder adaptation
+lora_decoder: true
+optimize_decoder: true  # gate LoRA decoder optimization (false = skip LoRA setup; combined with lora_decoder via AND)
+lora_rank: 4            # LoRA rank (number of basis vectors)
+lora_lr: 0.001          # LR for LoRA weights (A/B matrices)
+lora_alpha: 0.5         # scales the LoRA output
+lora_rs_scaling: true   # rank-stable scaling alpha/sqrt(rank) (Kalajdzievski 2023); false = classic alpha/rank
+lora_targets: "all"     # "all" / "attn" / "qkv" — which decoder nn.Linears get LoRA wrappers
+lora_init: "default"    # "default" (A ~ N(0, 1/rank²)) or "kaiming" (Hu et al. 2021)
+use_dora: true          # DoRA: weight-decomposed LoRA (Liu et al. 2024)
+lora_weight_decay: 0.0  # L2 on LoRA (zero-init B already pins iter-0 to no-op)
+
+# View-dependent SH colors
+sh_degree: null             # null=no per-frame, 0=DC offsets only, 1-3=DC+SH
+sh_lr: 0.001                # LR for DC offsets (degree 0)
+sh_lr_rest: 0.0             # LR for SH rest (degree 1+)
+sh_reg_weight: 0.1          # L2 penalty on SH rest → prevents base color corruption
+sh_consistency_weight: 0.1  # penalizes cross-frame SH variance
+
+# Regularization
+gauss_rotation_anchor_weight: 0.0  # soft L2 pull on canonical Gaussian _rotation toward iter-0 (0=off)
+token_drift_weight: 0.01  # L2 penalty pulling tokens toward their original values
+
+# Visibility gradient mask (stop-grad): detach the Gaussians occluded in every
+# train view BEFORE the render, so no gradient reaches their tokens OR the shared
+# decoder, and zero opt_feats.grad for voxels occluded in every view (keeps the
+# back at the appearance-init prior).
+token_grad_visibility_mask: true
+visibility_depth_margin: 0.02   # relative behind-surface tolerance of the depth occlusion test
+# One-sided anchor resisting opacity collapse of Gaussians not visible from any
+# train view (keeps the unseen back opaque). 0 = off.
+invisible_opacity_anchor_weight: 0.1
+
+perceptual_scale: 1.0
+# Jointly refine pose.  Required by `correction_granularity: shared` below,
+# which adds a Sim(3) parameter and raises when refine_poses=false.
+refine_poses: true
+random_background: true       # sample a fresh uniform RGB per render to avoid baking BG color into Gaussians
+random_background_seed: null  # set to an int for cross-run reproducibility; null = global RNG
+lr_warmup_steps: 10  # linear LR warmup over first N iters (0 = disabled)
+
+# ── Losses (appearance-focused defaults) ──────────────────────────────────────
+losses:
+  num_iterations: 100
+  lr_rotation: 0.01
+  lr_translation: 0.001
+  lr_scale: 0.0          # object size is set upstream; FINETUNE does not resize it
+
+  # RGB loss
+  rgb_weight: 1.0
+  rgb_multiscale: true
+  rgb_multiscale_scales: [1.0, 0.5, 0.25]
+  rgb_multiscale_weights: [0.5, 0.3, 0.2]
+  rgb_ssim_weight: 0.2
+
+  # Silhouette loss
+  silhouette_weight: 0.0
+  silhouette_com_weight: 0.0
+  silhouette_sdt_weight: 0.0
+  silhouette_iou_weight: 1.0
+  occlusion_robust_silhouette: true
+
+  # Regularization
+  regularization_weight: 0.0
+
+  # Depth
+  depth_weight: 0.1
+  depth_loss_type: "l1"
+  depth_mask_only: true  # single-object rendering — ignore depth outside GT mask
+
+  # Surface normals
+  normals_weight: 0.01
+  normals_discontinuity_threshold: 0.02
+
+  # Perceptual
+  perceptual_weight: 0.5
+  perceptual_crop_to_mask: true   # crop LPIPS to object bbox — VGG memory headroom
+  perceptual_crop_margin: 0.1     # bbox padding, fraction of extent per side
+  perceptual_autocast_bf16: false # bf16 LPIPS forward — more VGG mem headroom, slight precision cost
+
+# Per-block output flags (null = inherit from global output config)
+save_renders: null
+save_metrics: null
+save_cache: false
+exit_after: false
+
+# Pose correction granularity: "per_frame" | "shared" | "both".  "shared" is ONE
+# Sim(3) per object in its CANONICAL frame, composed onto every frame (root motion
+# survives).  "both" additionally leaves the per-frame poses free (gauge-ambiguous).
+correction_granularity: shared
+# Which transform owns SCALE under `correction_granularity: both`: "shared" freezes
+# the per-frame scale, "perframe" leaves it free.  Inert unless granularity is "both".
+correction_scale_control: shared

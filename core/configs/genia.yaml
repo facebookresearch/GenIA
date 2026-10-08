@@ -1,0 +1,27 @@
+# GenIA root configuration (python -m genia.core)
+# ==========================================
+# Hydra merges config groups listed in defaults, then applies _self_ overrides.
+# CLI overrides are applied on top:
+#   python -m genia.core dataset=image dataset.scene_name=<scene>
+#
+# Pipeline mode profiles (pipeline/) bundle block config groups + pipeline flags.
+# Experiment presets (experiment/) bundle the method recipe (ours.yaml); the dataset is
+# chosen with dataset=.
+
+defaults:
+  - dataset: image
+  - processing: map_anything
+  - output: default
+  - deformation_warp: default
+  - pipeline: mono_ours
+  - _self_
+
+hydra:
+  job:
+    chdir: false
+  run:
+    dir: .
+  sweep:
+    dir: .
+    subdir: .
+  output_subdir: null

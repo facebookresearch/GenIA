@@ -1,0 +1,10 @@
+name: co3d
+path: data/co3d_global   # LaRa CO3D split, global target-view selection
+scene_name: 189_20393_38136
+frame_index: null
+frame_stride: 1
+object_indices: null
+fps: 1
+downscale_factor: 1
+num_input_views: 4  # the 4 input views; null would also load the 4 held-out targets
+world_origin_is_object: true  # LaRa normalization puts the object at world origin

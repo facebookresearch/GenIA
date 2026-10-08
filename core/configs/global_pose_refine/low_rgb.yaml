@@ -1,0 +1,10 @@
+# Global pose refinement: default.yaml with the RGB terms at a tenth of their weight, so
+# depth L1 and chamfer lead and RGB only nudges the pose. Used for the first refinement,
+# right after a per-frame appearance pass: that early texture can be wrong, and full-weight
+# RGB follows it, while without RGB a single view loses its main cue for the rotation.
+defaults:
+  - default
+  - _self_
+
+rgb_weight: 0.1
+rgb_ssim_weight: 0.02

@@ -1,0 +1,4 @@
+# Depth/reconstruction caches written next to the inputs (ma_cache/)
+data/*/*/*_cache/
+# ActionMesh meshes fitted on first use by run_demo.py dynamic
+data/dynamic/*/actionmesh/

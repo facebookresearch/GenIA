@@ -1,0 +1,88 @@
+# Appearance Initialization — Per-frame mode
+# Re-runs Stage 2 diffusion per frame on each frame's own per-frame
+# coordinates, overwriting the per-frame SLATs. Poses and shape
+# tokens are left untouched.
+
+enabled: true
+strategy: perframe
+inference_steps: 25
+
+# ── In-ODE hooks (attn bias + rendering guidance) ─────────────────────────────
+# Both act on EACH per-frame Stage-2 prediction: when either master switch is
+# on, the per-frame denoise routes through a single-view `stage2_mv` instead of
+# the bare `pipeline.sample_slat`.  Knob meanings match canonical_unified.yaml.
+# Both default OFF here: `perframe` also serves as the cheap per-frame decode
+# run as APPEARANCE_INIT before a photometric gpr1.  Use
+# `appearance_init=perframe_guided` for the tuned-ON variant.
+visibility_min_weight: 0.001         # minimum per-view visibility weight
+visibility_neighbor_tolerance: 4.0   # ignore occluders within this voxel distance
+
+# Cross-attention bias: +alpha on attention logits for (voxel, patch) pairs
+# where the voxel projects onto that patch, computed on THIS frame's grid+pose.
+visibility_attn_bias: false              # master switch
+visibility_attn_bias_alpha: 5.0
+visibility_attn_bias_layers: all
+visibility_attn_bias_cropped_image: true   # cropped object image [5:1374]
+visibility_attn_bias_full_image: true      # full scene image [1379:2748]
+visibility_attn_bias_cropped_mask: false   # cropped mask [2753:4122]
+visibility_attn_bias_full_mask: false      # full mask [4127:5496]
+visibility_attn_bias_compensate_passive_streams: "approx"
+
+# In-ODE rendering guidance: decode the Tweedie SLAT and back-prop an
+# RGB+silhouette+depth+LPIPS loss into the velocity, against THIS frame's GT.
+rendering_guidance_active: false             # master switch
+rendering_guidance_velocity_weight: 1.0
+rendering_guidance_active_from: 0.0
+rendering_guidance_active_until: 1.0
+rendering_guidance_microbatch_size: 1
+rendering_guidance_resolution_scale: 1
+rendering_guidance_normalize_grad: true
+rendering_guidance_decoder_autocast_bf16: true
+rendering_guidance_random_background: true
+rendering_guidance_random_background_seed: null
+rendering_guidance_visibility_detach: true
+rendering_guidance_visibility_depth_margin: 0.02
+
+# Loss weights — full LossConfig schema (struct mode needs every field
+# ``_compute_frame_loss`` may read).
+rendering_guidance_losses:
+  num_iterations: 100
+  early_stop_patience: 0
+  lr_rotation: 0.01
+  lr_translation: 0.001
+  lr_scale: 0.0
+
+  rgb_weight: 1.0
+  rgb_multiscale: true
+  rgb_multiscale_scales: [1.0, 0.5, 0.25]
+  rgb_multiscale_weights: [0.5, 0.3, 0.2]
+  rgb_ssim_weight: 0.2
+
+  silhouette_weight: 0.0
+  silhouette_com_weight: 0.0
+  silhouette_sdt_weight: 0.0
+  silhouette_iou_weight: 1.0
+  occlusion_robust_silhouette: true
+
+  regularization_weight: 0.0
+
+  depth_weight: 0.1
+  depth_loss_type: l1
+  depth_mask_only: true
+
+  normals_weight: 0.01
+  normals_discontinuity_threshold: 0.02
+
+  perceptual_weight: 0.5
+  perceptual_crop_to_mask: true   # crop LPIPS to object bbox — VGG memory headroom
+  perceptual_crop_margin: 0.1     # bbox padding, fraction of extent per side
+  perceptual_autocast_bf16: false # bf16 LPIPS forward — more VGG mem headroom, slight precision cost
+
+# Reset predicted shape to GT mesh voxelisation at block entry (requires GT_SHAPES_INVERSION)
+reset_shape_to_gt: false
+
+# Per-block output flags (null = inherit from global output config)
+save_renders: null
+save_metrics: null
+save_cache: null
+exit_after: false

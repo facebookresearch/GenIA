@@ -1,0 +1,14 @@
+{
+  "1": {
+    "class": "plush",
+    "instance": 1
+  },
+  "2": {
+    "class": "pillow",
+    "instance": 1
+  },
+  "3": {
+    "class": "pillow",
+    "instance": 2
+  }
+}

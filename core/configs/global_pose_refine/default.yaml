@@ -1,0 +1,96 @@
+# Global pose refinement (GLOBAL_POSE_REFINE_1 / GLOBAL_POSE_REFINE_2): the
+# photometric strategy, rendering every object jointly with a detached
+# pointmap background.
+
+enabled: true
+
+# Per-block output flags (null = inherit from global output config)
+save_renders: null
+save_metrics: null
+save_cache: null
+exit_after: false
+
+# Optimization
+num_iterations: 500
+early_stop_patience: 50    # stop if no improvement for N iters (0 = disabled)
+# Rotation 10x lower than translation/scale so it does not absorb translation
+# error; scale and translation-z are coupled (depth ambiguity), so they share a rate.
+lr_rotation: 0.0005
+lr_translation: 0.005
+lr_scale: 0.005
+
+batch_size: 0              # frames per iteration; 0 = all frames
+
+# RGB loss (L1)
+rgb_weight: 1.0
+rgb_multiscale: true
+rgb_multiscale_scales: [1.0, 0.5, 0.25]
+rgb_multiscale_weights: [0.5, 0.3, 0.2]
+rgb_ssim_weight: 0.2
+
+# Silhouette loss
+silhouette_weight: 0.0
+silhouette_com_weight: 1.0
+silhouette_sdt_weight: 1.0
+silhouette_iou_weight: 0.5
+occlusion_robust_silhouette: true
+
+# Regularization (anchor poses to their initial values).  regularization_weight is
+# the master gate (0 = off); the per-component weights scale each part.  Rotation
+# only here.
+regularization_weight: 0.01
+regularization_rotation_weight: 1.0
+regularization_translation_weight: 0.0
+regularization_scale_weight: 0.0
+
+# Depth
+depth_weight: 0.1
+depth_loss_type: "l1"              # "l1" | "scale_shift_invariant"
+depth_mask_only: false
+# Append DETACHED pointmap-background Gaussians so the render has valid depth
+# outside the object union (required by depth_mask_only=false).  The full-image
+# loss mask makes the silhouette term inert.
+render_with_background: true
+
+# Chamfer (3D shape alignment vs GT depth): one-directional GT-depth -> posed-model
+# mean squared distance.  Wide basin, not pixel-aligned; the model's unseen back is
+# never penalized.
+chamfer_weight: 1.0
+chamfer_max_gt_points: 2048        # max GT-depth points per object/frame
+chamfer_max_model_points: 8192     # max posed-model points per object (fixed subset)
+# Drop background points from the Chamfer GT target: a median-centred radius cut
+# at factor x p95, applied once when the cloud is built.  0 = off.
+chamfer_gt_trim_factor: 3.0
+
+# Surface normals (sign-invariant cosine vs depth-derived normals)
+normals_weight: 0.0
+normals_discontinuity_threshold: 0.02
+
+# Perceptual (LPIPS)
+perceptual_weight: 0.0
+
+strategy: default            # "default" (photometric, this file) | "icp" (see icp.yaml)
+refine_geometry: canonical   # "canonical" | "own_frame" -- what each frame is refined against
+# Pose correction granularity: "per_frame" | "shared" | "both".  "shared" is ONE
+# Sim(3) per object in its CANONICAL frame, composed onto every frame's pose (root
+# motion survives).  "both" also leaves the per-frame poses free (gauge-ambiguous).
+correction_granularity: shared
+# Which transform owns SCALE under `correction_granularity: both`: "shared" freezes
+# the per-frame scale.  Inert unless granularity is "both".
+correction_scale_control: shared
+
+# ── ICP solver knobs: inert unless `strategy: icp` (see icp.yaml) ────────────
+icp_fit_scale: true              # false = hold the object's size
+icp_max_gt_points: null          # observed points per frame; null = every masked pixel
+icp_force_voxel_splat: true      # align the canonical shape splatted per voxel
+icp_target_seed: 0               # subsample seed (only drawn when icp_max_gt_points caps)
+icp_chamfer_reverse_weight: 0.0  # add w*chamfer(rendered->observed)
+icp_pred_trim_factor: 0.0        # outlier trim on the RENDERED cloud (x p95 radius)
+icp_p2pl_trim: 0.8               # keep this quantile of matches, closest first
+icp_p2pl_gnc_from: 8.0           # kernel half-width at iter 0, in cloud resolutions
+icp_p2pl_gnc_to: 0.8             # ... and at the last iteration
+icp_p2pl_normal_threshold: 0.5   # reject matches whose normals disagree; -1 = off
+icp_perframe_prior_weight: 1.0   # per-timestamp ridge toward the shared Sim(3); >0 under `both`
+icp_max_scale_step: 0.1          # max fractional size change per iteration
+icp_p2pl_normals: pca            # "pca" | "depth"
+icp_keep_best_iterate: false     # return the lowest-residual iterate, not the last

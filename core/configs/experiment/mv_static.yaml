@@ -1,0 +1,8 @@
+# @package _global_
+defaults:
+  - ours
+  # The MV pipeline, kept for explicitness; it resolves identically to mono_ours
+  # (`mv_shared_world_pose` is on in pipeline/default.yaml).  A CLI `pipeline=`
+  # still wins over this defaults-list entry.
+  - override /pipeline: mv_ours
+  - _self_

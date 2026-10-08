@@ -1,0 +1,7 @@
+defaults:
+  - default
+  - _self_
+
+depth_source: gt
+camera_poses_source: gt
+median_intrinsics: false     # Ignored when depth_source=gt (GT has fixed intrinsics)

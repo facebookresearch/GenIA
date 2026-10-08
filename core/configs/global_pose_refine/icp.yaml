@@ -1,0 +1,107 @@
+# Global pose refinement: ICP strategy.
+#
+# Pose is optimised against a nearest-neighbour match between the RENDERED surface and
+# the observed depth cloud, not per pixel.  `depth_l1` and the silhouette are
+# PIXEL-ALIGNED, so a few pixels of misregistration compare unrelated surface; ICP
+# compares CORRESPONDING surface.  Direction is GT -> rendered, which is what makes it
+# occlusion tolerant: every observed point must be explained, while the model's
+# unobserved back is never asked to explain anything.
+#
+# The delta is solved in closed form by point-to-plane least squares: trimmed,
+# normal-gated, Welsch-weighted correspondences on a graduated-non-convexity (GNC)
+# schedule, in the object's canonical frame.  This preset solves ONE Sim(3) per object
+# (`correction_granularity: shared`), composed onto each frame's existing pose, so
+# per-frame root MOTION survives.
+
+enabled: true
+
+strategy: icp
+refine_geometry: canonical   # "canonical" | "own_frame" -- what each frame is refined against
+correction_granularity: shared      # "per_frame" | "shared" | "both" — see default.yaml
+correction_scale_control: shared    # which transform owns SCALE under `both`; inert otherwise
+
+# Per-block output flags (null = inherit from global output config)
+save_renders: null
+save_metrics: null
+save_cache: null
+exit_after: false
+
+# Solver step budget.  The residual typically bottoms around iteration 30 and rises as
+# the GNC gate narrows; `icp_keep_best_iterate` below returns the best iterate.
+num_iterations: 60
+
+icp_fit_scale: true              # let the delta change the object's size
+icp_max_gt_points: null          # observed points per frame; null = every masked pixel
+# Align the canonical shape, splatted one Gaussian per voxel, rather than this block's own
+# reconstruction: the splat is the only source present on EVERY frame (a GT-injected or
+# Stage-1 shape is occupancy, not a SLAT).  An object with no voxel grid falls back to its
+# Gaussians.
+icp_force_voxel_splat: true
+icp_target_seed: 0               # subsample seed (only drawn when icp_max_gt_points caps)
+# Also penalise rendered surface with no observation near it, which opposes the
+# forward term's tendency to grow the object.
+icp_chamfer_reverse_weight: 1.0
+icp_pred_trim_factor: 0.0        # outlier trim on the RENDERED cloud (x p95 radius); 0 = off
+
+# Keep this quantile of the surviving correspondences, closest first (Chetverikov).  The
+# third rejection, after the distance gate and the normal test.  1.0 = keep everything.
+icp_p2pl_trim: 0.8
+# The correspondence kernel's half-width at the first / last iteration, in units of the
+# observed cloud's median point spacing (geometric interpolation between them).  Wide
+# early to find the basin, narrow late to reject outliers.  `gnc_from` also sets the
+# solver's REACH (matches are gated at 3 x nu x resolution): raise it first if a run
+# reports a low `gate_kept` in its history and does nothing.
+icp_p2pl_gnc_from: 8.0
+icp_p2pl_gnc_to: 2.0
+# Reject a match whose two normals disagree by more than this cosine (it has crossed to
+# the far side of a thin structure).  -1.0 disables the test.
+icp_p2pl_normal_threshold: 0.5
+# The per-timestamp residual's ridge toward the shared transform, as a multiple of ONE
+# frame's evidence.  REQUIRED > 0 under `correction_granularity: both`, where it decides
+# how the error splits between the shared and per-timestamp transforms.
+icp_perframe_prior_weight: 1.0
+# Clamp on the fractional size change ONE iteration may take.
+icp_max_scale_step: 0.1
+# Surface normals from the depth map's own GRID (better conditioned than PCA over the
+# scattered cloud, and no KNN).  "pca" is the alternative.
+icp_p2pl_normals: depth
+# Return the lowest-residual iterate instead of the last one.
+icp_keep_best_iterate: true
+
+# Everything below is INERT under strategy=icp and set to zero so a reader is not misled
+# into tuning it: the solver has its own single loss.
+lr_rotation: 0.0
+lr_translation: 0.0
+lr_scale: 0.0
+early_stop_patience: 0
+rgb_weight: 0.0
+rgb_ssim_weight: 0.0
+silhouette_weight: 0.0
+depth_weight: 0.0
+normals_weight: 0.0
+perceptual_weight: 0.0
+chamfer_weight: 0.0
+regularization_weight: 0.0
+
+# ── Completeness block ────────────────────────────────────────────────────────
+# Every remaining key of this group's `default.yaml`, so the config RESOLVES (the YAML
+# is the schema at runtime) and flipping `strategy` back to `default` lands on a
+# complete config.  Inert under `strategy: icp`.
+batch_size: 0
+rgb_multiscale: true
+rgb_multiscale_scales: [1.0, 0.5, 0.25]
+rgb_multiscale_weights: [0.5, 0.3, 0.2]
+silhouette_com_weight: 0.0
+silhouette_sdt_weight: 0.0
+silhouette_iou_weight: 0.0
+occlusion_robust_silhouette: true
+regularization_rotation_weight: 0.0
+regularization_translation_weight: 0.0
+regularization_scale_weight: 0.0
+depth_loss_type: l1
+depth_mask_only: false
+render_with_background: true
+chamfer_max_gt_points: 2048
+chamfer_max_model_points: 8192
+chamfer_gt_trim_factor: 3.0     # trim the GT cloud at factor x p95 radius; 0 = off
+normals_discontinuity_threshold: 0.02

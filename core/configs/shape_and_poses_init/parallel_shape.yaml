@@ -1,0 +1,16 @@
+# Shape pass (block shape_init): the joint shape+pose ODE, keeping the per-frame shape;
+# pose_init re-denoises the pose afterwards, falling back to this pass's pose on a flip.
+defaults:
+  - parallel
+  - _self_
+
+# The reference-only restriction would leave the non-reference views without a shape,
+# which is exactly this pass's product.
+mv_reference_only_ode: false
+
+# Disk cache of this pass's output (cached_shapes/sam3d/{dataset}/{scene}/...): the
+# per-frame shape latents, keyed on the seed, this resolved config, the conditioning and
+# the input shape latent (NOT the checkpoint weights).  A relative path resolves
+# against the genia checkout (paths.GENIA_ROOT), not the working directory; null
+# disables.  See core/sam3d_shape_cache.py.
+shape_cache_dir: cached_shapes

@@ -1,0 +1,11 @@
+# @package _global_
+# Multi-view "ours" pipeline = the shared ours recipe (core/configs/pipeline/ours.yaml).
+# `mv_shared_world_pose` is restated below for readability; pipeline/default.yaml
+# already turns it on. This preset and mono_ours resolve identically: the mono/MV
+# distinction lives in the DATA (`Sequence.is_mv`), not here.
+defaults:
+  - ours
+  - _self_
+
+pipeline:
+  mv_shared_world_pose: true

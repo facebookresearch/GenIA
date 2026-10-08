@@ -1,0 +1,16 @@
+enabled: false
+
+# Present (matching the canonical/perframe configs + the FinetuningConfig
+# dataclass default) so a `finetuning.refine_poses=...` value override still
+# type-checks with `finetuning=none` — inert here, since the block is disabled.
+refine_poses: true
+
+# Same reason as refine_poses above: a `finetuning.random_background_seed=...`
+# override must find the key on the none-struct.  Inert here (block disabled).
+random_background_seed: null
+
+# Per-block output flags (null = inherit from global output config)
+save_renders: null
+save_metrics: null
+save_cache: null
+exit_after: false

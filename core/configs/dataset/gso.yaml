@@ -1,0 +1,10 @@
+name: gso
+path: data/gso30
+scene_name: elephant
+frame_index: null
+frame_stride: 1
+object_indices: null
+fps: 1
+downscale_factor: 1
+num_input_views: null
+world_origin_is_object: true  # EscherNet convention: cameras orbit around object at world origin

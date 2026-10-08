@@ -1,0 +1,22 @@
+enabled: false
+strategy: perframe
+
+visibility_weighting: false
+visibility_alpha: 30.0
+visibility_neighbor_tolerance: 4.0
+visibility_attn_bias: false
+visibility_attn_bias_alpha: 5.0
+visibility_attn_bias_layers: all
+visibility_attn_bias_cropped_image: true
+visibility_attn_bias_full_image: true
+visibility_attn_bias_cropped_mask: true
+visibility_attn_bias_full_mask: true
+
+# Reset predicted shape to GT mesh voxelisation at block entry (requires GT_SHAPES_INVERSION)
+reset_shape_to_gt: false
+
+# Per-block output flags (null = inherit from global output config)
+save_renders: null
+save_metrics: null
+save_cache: null
+exit_after: false

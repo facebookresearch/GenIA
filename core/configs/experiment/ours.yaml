@@ -1,0 +1,28 @@
+# @package _global_
+# Shared "ours" experiment config. mono_static.yaml, mono_dyn.yaml and mv_static.yaml
+# extend it; the first two are identical aliases, mv_static also selects pipeline=mv_ours.
+
+# Stage-1 pose init. The mono_ours pipeline runs the SPLIT:
+# shape_init settles the per-frame shape, then pose_init denoises pose —
+# gt_shape_trajectory holds the settled shape (parallel_pose), the backbone denoises
+# translation+scale from noise, and the post-ODE refit grounds them on the depth.
+# global_pose_refine_1 then finishes the fit with ICP against a voxel splat of the
+# canonical shape. The recipe below configures pose_init; the block redirects live in
+# core/configs/pipeline/ours.yaml.
+
+gt_shapes_inversion:
+  canonical_frame_idx: 0   # grounds the deformation field at view 0, frame 0 (per-frame datasets); inert for global-mode GSO.
+
+# The pose pass of the Stage-1 split (block pose_init).  The backbone denoises
+# translation+scale itself, the post-ODE refit grounds them on the observed depth, and
+# global_pose_refine_1 (ICP) finishes the fit.
+pose_init:
+  shape_velocity_averaging: none
+  rotation_velocity_averaging: median   # robust to an outlier frame the mean absorbs
+  inference_steps: 10                   # fewer than the default 25, at ~0.46x the cost
+  post_rotation_refit: both
+  # Re-derived from noise, the rotation can land in another mode of a near-symmetric
+  # object (a flat square pillow turned half a turn fits silhouette and depth alike),
+  # which no refinement undoes.  Restore shape_init's pose for a frame this pass rotates
+  # further than this: on the demo scenes real changes stay under 8 deg, flips are ~170.
+  pose_flip_guard_deg: 30
