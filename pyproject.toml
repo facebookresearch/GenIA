@@ -1,0 +1,36 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "genia"
+version = "1.0.0"
+description = "GenIA: Generative Reconstruction with Test-Time Input Alignment"
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.11"
+# Dependencies are installed by install.sh (environment.yml + requirements.txt): most
+# of them are CUDA extensions compiled against one specific torch build, which pip's
+# resolver would otherwise replace. `pip install -e . --no-deps` only registers the
+# `genia.core` import path.
+
+# This checkout IS the `genia` package: `genia` maps onto the repository root, and the
+# code lives in `genia.core` (core/). The root has no __init__.py, so nothing but core/
+# is importable as part of the package.
+[tool.setuptools]
+package-dir = { "genia" = "." }
+packages = ["genia.core", "genia.core.utils", "genia.core.configs"]
+
+[tool.setuptools.package-data]
+"genia.core.configs" = ["*.yaml", "*/*.yaml"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+exclude = ["submodules"]
+
+[tool.ruff.lint]
+# Syntax errors, always-true/false comparisons and statement-level bugs.
+select = ["E9", "F63", "F7"]

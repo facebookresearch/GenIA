@@ -1,0 +1,11 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+
+name: mvcustom
+path: data/mvcustom
+scene_name: pablo
+frame_index: null
+frame_stride: 1
+object_indices: null
+fps: 1
+downscale_factor: 1
+num_input_views: null

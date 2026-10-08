@@ -1,0 +1,44 @@
+# @package _global_
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+
+# Shared "ours" pipeline recipe. mono_ours.yaml and mv_ours.yaml extend this and
+# override only what genuinely differs between the mono and multi-view regimes.
+# The recipe is the Stage-1 split (shape_init -> pose_init; the per-frame appearance
+# pass is off, see below), an ICP global pose refine at gpr1, canonical Stage-2,
+# FINETUNE, and a photometric global pose refine at gpr2.
+defaults:
+  - /gt_shapes_inversion: none
+  - /shape_and_poses_init@shape_init: parallel_shape   # split: settle shape first (pose = fallback)
+  # The per-frame appearance pass, which decodes the settled shape into per-frame
+  # Gaussians.  It runs HERE, between shape_init and pose_init, so that a photometric
+  # gpr1 has Gaussians to render.  Off by default; set it to `perframe` together with
+  # `global_pose_refine@global_pose_refine_1=default` -- the two form a pair, since
+  # that gpr1 renders these Gaussians.
+  - /appearance_init: none
+  - /shape_and_poses_init@pose_init: parallel_pose     # split: denoise pose (gt_shape_trajectory)
+  # ICP, not the photometric `default`: it aligns the canonical shape splatted one
+  # Gaussian per voxel (`icp_force_voxel_splat`), so it needs no reconstruction to render
+  # and APPEARANCE_INIT can stay off.  60 iterations, the per-iteration size change
+  # clamped by `icp_max_scale_step` (see core/configs/global_pose_refine/icp.yaml).
+  - /global_pose_refine@global_pose_refine_1: icp
+  # ONE canonical strategy for static and dynamic alike.  On a single-timestamp
+  # scene (GSO/CO3D/mvcustom: every asset at frame 0) `canonical_unified`
+  # degenerates to `canonical` -- `main._appearance_unified_is_static` detects it
+  # and dispatches there, which also lets a static run take the unified config with
+  # no GT correspondence -- so this is the consensus fusion for dynamic scenes and
+  # plain canonical Stage-2 for static ones.
+  #
+  # Note: the DYNAMIC path indexes `pf_to_canon` into the rows of the GT
+  # voxelisation, so it needs INJECTED shape and refuses a predicted grid
+  # (main.py).  Use `appearance_init@appearance_init_2=perframe_guided` for a
+  # dynamic run with no shape injection.
+  - /appearance_init@appearance_init_2: canonical_unified
+  # The final pose block, after APPEARANCE_INIT_2 and FINETUNE: `default`
+  # (photometric, canonical scope, one shared Sim(3)).  gpr1 stays `icp` above.
+  #
+  # Canonical SCOPE needs a canonical object.  A mono-DYNAMIC run with no shape
+  # injection builds none; `run_global_refine` then prints a fallback and refines each
+  # frame against its own reconstruction, or raises when that is not possible either.
+  - /global_pose_refine@global_pose_refine_2: default
+  - /finetuning: canonical
+  - default

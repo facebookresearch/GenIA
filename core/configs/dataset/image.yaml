@@ -1,0 +1,10 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+
+name: image
+path: data/images
+scene_name: duck
+frame_index: null
+frame_stride: 1
+object_indices: null
+fps: 1
+downscale_factor: 1

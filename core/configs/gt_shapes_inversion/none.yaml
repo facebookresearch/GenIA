@@ -1,0 +1,19 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+
+# GT_SHAPES_INVERSION block — disabled.
+enabled: false
+
+mode: per_frame_meshes              # "per_frame_meshes" | "global"
+gt_data_root: data/davis_actionmesh
+scene_subdir: ""
+num_inversion_steps: 100
+inversion_precision: auto  # auto = bf16 on Ampere+, fp32 otherwise (bf16 is 1.7x SLOWER on pre-Ampere). Force: fp32 | bf16 | fp16
+inversion_chunk_size: 16   # frames per GPU batch (per_frame_meshes); ~1.0 GB activations/frame, OOM halves+retries. 0 = all
+gt_mesh_dilate: 0
+load_gt_poses: false
+
+# Per-block output flags (null = inherit from global output config)
+save_renders: null
+save_metrics: null
+save_cache: null
+exit_after: false

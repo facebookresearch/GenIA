@@ -1,0 +1,45 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+
+# Per-frame FINETUNE — optimize each frame's OWN SLAT against that frame's GT.
+#
+# For runs with no canonical object (`has_canonical=False`): a dynamic sequence
+# reconstructed from SAM3D's per-frame shapes, where `strategy=canonical` has
+# nothing to optimize (`canonical_slats` is empty).  Each (object, frame) runs
+# as a ONE-FRAME instance of the canonical optimizer, so it reads the SAME
+# config — hence the inheritance below rather than a parallel copy: every knob
+# canonical.yaml documents applies here with the same meaning, and a key added
+# there can never go missing here.
+#
+# One knob differs in EFFECT, not in meaning (see `finetune_perframe_tokens`):
+#   - `num_iterations` is spent PER FRAME, so
+#     wall-clock scales with the frame count (a 16-frame scene costs 16x the
+#     canonical block at the same value).  Lower it if FINETUNE dominates.
+#
+# LoRA weights are not persisted on this path (only `set_canonical_slat` reads
+# `PipelineState.lora_state_dicts`, and there is no canonical) — the Gaussians
+# decoded inside the loop carry the adaptation and go straight to state.
+defaults:
+  - canonical
+  - _self_
+
+strategy: perframe
+
+# ── Overrides vs canonical.yaml ──────────────────────────────────────────────
+# Deliberately different; everything else is inherited.
+token_grad_visibility_mask: false     # canonical: true
+invisible_opacity_anchor_weight: 0.0  # canonical: 0.1
+
+# ── Restated from canonical.yaml (NOT overrides — keep the values in sync) ────
+# The 40GB FINETUNE OOM guard.  Inherited anyway; spelled out here because this
+# path is the one that runs on the big dynamic scenes.  Note the gate matters
+# more here: iterations are spent PER FRAME, so the ~2x checkpointed decode is
+# multiplied by the frame count.  Calibration behind the 30000: see canonical.yaml.
+decoder_checkpoint: true
+decoder_checkpoint_min_voxels: 30000
+
+losses:
+  lr_scale: 0.0                            # same as canonical
+
+# Pose correction granularity (see canonical.yaml).
+correction_granularity: per_frame
+correction_scale_control: shared

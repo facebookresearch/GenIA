@@ -1,0 +1,10 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+
+name: davis_actionmesh
+path: data/davis_actionmesh
+scene_name: camel
+frame_index: null
+frame_stride: 1
+object_indices: null
+fps: 24
+downscale_factor: 1

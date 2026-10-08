@@ -1,0 +1,40 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+
+# GT_SHAPES_INVERSION block — per-frame OursActionBench mesh inversion.
+# Same temporal-mesh layout as ActionMesh.
+# Layout: data/oursactionbench/{scene}/obj_NNN/mesh_NN.glb (NNN = obj_idx-1).
+# Loaded by the shared "temporal surfaces" loader
+# (genia.core.gt_geometry._load_and_normalize_temporal_surfaces).
+
+enabled: true
+
+mode: per_frame_meshes
+gt_data_root: data/oursactionbench
+scene_subdir: ""           # meshes sit at the scene root, like ActionMesh
+num_inversion_steps: 100
+prior_weight: 1.0          # VAE-prior moment match: prior_weight * (mean(z)^2 + (var(z) - prior_target_var)^2)
+prior_target_var: 0.9      # target variance — 0.9 matches empirical Stage-1 distribution
+l2_weight: 0.0             # per-element L2: redundant with prior_weight>0; leave at 0.0
+inversion_precision: auto  # auto = bf16 on Ampere+, fp32 otherwise (bf16 is 1.7x SLOWER on pre-Ampere). Force: fp32 | bf16 | fp16
+inversion_chunk_size: 16   # frames per GPU batch (per_frame_meshes); ~1.0 GB activations/frame, OOM halves+retries. 0 = all
+gt_mesh_dilate: 0          # used only by mode=global and perframe_voxelization=surface
+load_gt_poses: true        # derive per-frame R/t/s from per-scene fitted cameras in data/oursactionbench/{scene}/camera.json
+# Per-frame mode → the deformation field (per-frame-voxel→canonical
+# correspondence + per-vertex Kabsch) is built automatically, grounded on
+# canonical_frame_idx.
+canonical_frame_idx: 0     # grounding frame (view 0, frame 0 by default)
+k_kabsch: 8                # kNN neighbourhood for per-vertex Kabsch (compute_canonical_mesh_correspondence)
+subdivide_passes: 2        # OAB meshes are coarse (367 verts → coarse face barycenters); 2 passes drops barycenter L2 ~4× at 16× memory.
+perframe_voxelization: vertex     # "surface" (open3d) | "vertex" (barycentric-lattice binning, exact cKDTree-free correspondence)
+perframe_voxel_sample_edge: 0.5   # barycentric lattice spacing in voxels (vertex method); coarse OAB meshes → ~90% surface coverage
+
+# Local rotation applied to GT meshes at load time (mesh vertices AND the
+# per-frame voxelisation), compensated analytically in the object pose so the
+# posed shape still reprojects onto the image.
+local_rotation: rot_x_+90
+
+# Per-block output flags (null = inherit from global output config)
+save_renders: null
+save_metrics: null
+save_cache: null
+exit_after: false

@@ -1,0 +1,39 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+
+# GT_SHAPES_INVERSION block — per-frame ActionMesh GT mesh inversion.
+# Layout: data/davis_actionmesh/{scene}/obj_NNN/mesh_NN.glb (NNN = obj_idx-1).
+# Inverts each frame's GT mesh into a Stage-1 shape latent and writes
+# per-frame raw_ss_modalities['shape'] in tokens_by_object.
+
+enabled: true
+
+mode: per_frame_meshes
+gt_data_root: data/davis_actionmesh
+scene_subdir: ""           # extra segment between {scene} and obj_NNN/ (dyncustom stages meshes at {scene}/actionmesh/)
+num_inversion_steps: 100
+prior_weight: 1.0          # VAE-prior moment match: prior_weight * (mean(z)^2 + (var(z) - prior_target_var)^2)
+prior_target_var: 0.9      # target variance — 0.9 matches empirical Stage-1 distribution
+l2_weight: 0.0             # per-element L2: redundant with prior_weight>0; leave at 0.0
+inversion_precision: auto  # auto = bf16 on Ampere+, fp32 otherwise (bf16 is 1.7x SLOWER on pre-Ampere). Force: fp32 | bf16 | fp16
+inversion_chunk_size: 16   # frames per GPU batch (per_frame_meshes); ~1.0 GB activations/frame, OOM halves+retries. 0 = all
+gt_mesh_dilate: 0          # used only by mode=global and perframe_voxelization=surface
+load_gt_poses: false       # ActionMesh has no GT camera/object poses
+# Per-frame mode → the deformation field (per-frame-voxel→canonical
+# correspondence + per-vertex Kabsch) is built automatically, grounded on
+# canonical_frame_idx.
+canonical_frame_idx: 0     # grounding frame (view 0, frame 0 by default)
+k_kabsch: 8                # kNN neighbourhood for per-vertex Kabsch (compute_canonical_mesh_correspondence)
+perframe_voxelization: vertex     # "surface" (open3d) | "vertex" (barycentric-lattice binning, exact cKDTree-free correspondence)
+perframe_voxel_sample_edge: 0.5   # barycentric lattice spacing in voxels (vertex method); ~87-96% surface coverage
+
+# Local rotation applied to GT meshes at load time.  Composed left-to-right:
+# first rotate -90° around Y (handedness flip), then +90° around X (Z-up →
+# Y-up).  See genia.core.utils.gt_data._ACTIONBENCH_ROTATION_PRESETS for the
+# full preset list (identity, flip_{x,y,z}, rot_{x,y,z}_{+,-}90).
+local_rotation: [rot_y_-90, rot_x_+90]
+
+# Per-block output flags (null = inherit from global output config)
+save_renders: null
+save_metrics: null
+save_cache: null
+exit_after: false

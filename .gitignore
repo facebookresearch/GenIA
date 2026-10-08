@@ -1,0 +1,15 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+
+__pycache__
+*.pyc
+.ruff_cache/
+.vscode
+*.egg-info/
+*.log
+logs/
+
+# Run outputs (paths.RESULTS)
+results/
+cached_shapes/
+
+*.ply

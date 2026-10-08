@@ -1,0 +1,15 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+
+defaults:
+  - default
+  - _self_
+
+# Map-anything for depth + camera poses (no GT available)
+reconstruction_model: map_anything
+depth_source: pred
+camera_poses_source: pred         # map-anything's predicted poses
+median_intrinsics: false
+map_anything_model_id: facebook/map-anything
+# Condition MA on GT signals (improves prediction); set true only when the GT signal exists.
+condition_recon_model_on_gt_poses: false   # requires GT poses
+condition_recon_model_on_gt_depths: false  # requires GT depth

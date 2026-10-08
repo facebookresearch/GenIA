@@ -1,0 +1,78 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+
+output_dir: null           # Auto-generated if omitted
+experiment_suffix: null    # Appended (underscore-joined) to the experiment path segment
+save_renders: true
+save_metrics: true
+save_cache: true
+suppress_intermediate_renders: false
+suppress_intermediate_metrics: false
+render_decoded: true
+render_size: 512
+render_distance: 2.0
+render_fov: 40.0
+save_decoded_ply: false
+save_compressed_ply: true
+save_decoded_meshes: false
+save_output_ply: true
+save_output_mesh: true
+save_output_renders: true
+save_colmap: true
+save_world_assets: true    # gaussians/world+background, meshes/world (world space, colmap-aligned)
+save_slat_voxels: false
+save_slat_voxel_mesh: false
+# Track DATA exports (named for the files they write), and the PICTURES drawn from them.
+save_tracks_2d: true       # final/tracks_2d.npz  (dense 2D anchor tracks)
+save_tracks_3d: true       # final/tracks_3d.npz  (per-object world-space 3D tracks)
+save_viz_tracks_2d: true   # {scene}_tracks_2d_world_space.mp4
+save_viz_tracks_3d: true   # {scene}_tracks_3d_world_space.png
+# Anchors per object in tracks_2d.npz.
+tapvid_track_points: 16384
+save_pose_axes_3d: false
+save_pose_axes_2d: false
+save_synth_nvs: null          # 4 synthesized views per timestamp (±azimuth, ±elevation off
+                              # each train camera) → the CLIP-I consistency diagnostic.
+                              # null = auto: ON for every dataset with no GT test split
+                              # (davis_actionmesh, dyncustom, mvcustom, image), OFF for
+                              # gso/oursactionbench/co3d, which have a scored renders_test/.
+                              # true/false force it.
+synth_nvs_azimuth: 30.0       # HORIZONTAL magnitude (deg): two views at ±this
+synth_nvs_azimuth_step: 0.0   # Extra azimuth per timestamp (0 = fixed offset, what the
+                              # diagnostic wants; nonzero = slow orbit over time)
+synth_nvs_elevation: 30.0     # VERTICAL magnitude (deg): the other two views at ±this
+save_viz_orbit: true          # Turntable → final/viz/orbit/orbit.mp4 (same render as the CLI's -r orbit)
+viz_orbit_frames: 60          # Orbit steps per turn (0 = one per frame key)
+viz_orbit_fps: 24             # Video frame rate
+viz_orbit_slowmo: 10          # Play the motion N times slower: each 1-frame interval drawn over N
+                              # steps, the deformation interpolated between the two frames. EVERY
+                              # animated run gets frames x N steps (same duration and camera path);
+                              # geometry comes from final/final.pt (canonical gaussians + the
+                              # deformation field, rows correspond by construction), falling back
+                              # to the exported PLYs. Where rows do not correspond (e.g. PLYs
+                              # Morton-sorted by save_compressed_ply) each frame is held instead
+                              # of interpolated. 1 = off
+viz_orbit_up: auto            # Spin axis: auto (dataset world up where known) | camera | world | "x,y,z"
+save_viz_world_space: true    # Scene overview → final/viz/world_space/ (CLI's -r world_space).
+                              # Every object posed into WORLD space, seen from one overview camera
+                              # PER VIEW (each behind the input camera that observed it, KEEPING
+                              # ITS OWN ELEVATION centred on the mean — one shared camera, or a
+                              # flattened one, renders V copies of the same picture on an MV run
+                              # whose views agree in world space). Target/distance/focal are
+                              # shared, so the views stay comparable in scale.
+                              # ONE PNG per (frame, view) + one mp4 per view that has more than
+                              # one frame: mono-static 1 PNG, mono-dyn N PNGs + 1 clip, mv-static
+                              # V PNGs no clip, mv-dyn V*N PNGs + V clips. An MV run suffixes
+                              # EVERY view incl. view 0 ({NNN}_v{VV}.png); mono keeps {NNN}.png.
+                              # FOREGROUND ONLY — the background point cloud and the Sim(3) pose
+                              # axes are opt-in overlays (-O world_space.{background,axes}=true).
+                              # Framed on the foreground (camera aims at the objects' box centre,
+                              # focal fitted to them over the whole sequence, so it stays static).
+                              # Root motion KEPT, unlike the orbit — the scene-LAYOUT render.
+                              # Written for every run, including identity-c2w ones (OAB)
+                              # that {scene}_keyframe_final_world_space_*.png skips.
+save_viz_track_overlays: true # 3D track overlays → final/viz/track_overlays/{train_views,synth_nvs|test_views}/
+                              # (CLI's -r track_overlay -r track_overlay_nvs). ANNOTATED, 2x-supersampled
+                              # pixels, so their own folder, never renders_train/, viz/train_views/ or
+                              # viz/synth_nvs/. Written for every DYNAMIC run (a static run has no
+                              # trajectory to draw and is skipped): no tracks_2d.npz just means
+                              # nothing is drawn on top, same crop and viewpoint.

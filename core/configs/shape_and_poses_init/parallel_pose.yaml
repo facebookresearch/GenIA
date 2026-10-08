@@ -1,0 +1,10 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+
+# Pose pass (block pose_init): denoises the pose over the already-settled shape (from
+# shape_init, or injected).  The shape token follows (1-t)*noise + t*clean toward it.
+defaults:
+  - parallel
+  - _self_
+
+gt_shape_trajectory: true
+shape_velocity_averaging: none     # the shape follows the trajectory; averaging it is rejected

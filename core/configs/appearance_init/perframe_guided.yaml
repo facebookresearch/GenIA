@@ -1,0 +1,19 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+
+# Appearance Initialization — Per-frame mode WITH the in-ODE hooks on.
+#
+# `perframe` plus the two Stage-2 improvements
+# used by `canonical_unified`: the cross-attention visibility bias and the in-ODE
+# rendering guidance.  Both act on each per-frame Stage-2 prediction (single-view
+# `stage2_mv`); everything else is inherited from perframe.yaml.
+#
+# Values match canonical_unified.yaml.  Attn bias targets LPIPS, rendering
+# guidance targets PSNR/SSIM.
+#
+# Used as `appearance_init_2` on the dynamic per-frame runs.
+defaults:
+  - perframe
+  - _self_
+
+visibility_attn_bias: true
+rendering_guidance_active: true

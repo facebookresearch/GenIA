@@ -1,0 +1,12 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+
+[submodule "submodules/map-anything"]
+	path = submodules/map-anything
+	url = https://github.com/facebookresearch/map-anything.git
+[submodule "submodules/actionmesh"]
+	path = submodules/actionmesh
+	url = https://github.com/facebookresearch/ActionMesh
+[submodule "submodules/sam-3d-objects"]
+	path = submodules/sam-3d-objects
+	url = https://github.com/facebookresearch/sam-3d-objects
+	ignore = dirty

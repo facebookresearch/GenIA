@@ -1,0 +1,21 @@
+# @package _global_
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+
+# Shared pipeline settings and block config group defaults.
+# Inherited by all pipeline modes (mono_ours, mv_ours).
+
+pipeline:
+  # is_dynamic and is_mv are derived from the FrameKey set on `Sequence`
+  # (see core/utils/sequence.py). Pipeline configs are algorithmic recipes
+  # only; data shape is determined by the `dataset=` group.
+  # Collapse per-camera object poses to ONE shared local->world placement per timestamp.
+  # A single rigid object has one world pose per timestamp, not one per view.
+  # `correction_granularity: per_frame`/`both` refuse to run on MV data without this
+  # (config.resolve_correction_granularity).
+  # Monocular data ignores it: `Pipeline.bind` (core/pipeline.py) turns it off there, since with one view per
+  # timestamp the collapse is vacuous.
+  mv_shared_world_pose: true
+  optimize_pose_tokens: true
+  white_background: true     # Use white background when rendering Gaussians
+  verbose: true
+  log_interval: 20

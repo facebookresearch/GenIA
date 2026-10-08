@@ -1,0 +1,34 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+
+# Stage-1 ODE (config group shape_and_poses_init): every frame's shape + pose tokens
+# denoised in one batched solve.  Base of parallel_shape (shape_init) and
+# parallel_pose (pose_init).  See ShapeAndPosesInitConfig in core/config.py.
+enabled: true
+strategy: parallel
+inference_steps: null            # null = the generator default (25)
+
+gt_shape_trajectory: false       # drive the shape token along (1-t)*noise + t*clean
+
+# Cross-frame coupling of the velocities.
+shape_velocity_averaging: entropy       # none | entropy (views of one timestamp fuse)
+entropy_alpha: 30.0
+entropy_layer: 9
+entropy_min_weight: 0.001
+rotation_velocity_averaging: none       # none | median (per view, across timestamps)
+pose_velocity_broadcast_per_frame: true # every view of a timestamp takes the lead view's pose velocity
+cfg_interval_pose: []                   # [] disables classifier-free guidance on pose
+pose_flip_guard_deg: null               # restore the prior pose when this pass rotates a frame by more; null = off
+
+mv_reference_only_ode: true      # MV-static: run the ODE on the reference view only
+
+# Post-ODE (translation, scale) refit from the decoded rotation.
+post_rotation_refit: none        # none | translation | scale | both
+post_rotation_refit_mv_consensus: true
+post_rotation_refit_disc_threshold: 0.02   # drop depth discontinuities from the depth statistics (0 = off)
+post_rotation_refit_erode_px: 0
+
+# Per-block output flags (null = inherit from global output config)
+save_renders: null
+save_metrics: null
+save_cache: null
+exit_after: false

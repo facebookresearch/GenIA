@@ -1,0 +1,122 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+
+# Appearance Initialization — canonical mode (static + dynamic).
+#
+# Runs Stage 2 once on a single canonical SLAT.  A single-timestamp scene
+# (static MV / GSO / CO3D / mvcustom) fuses the per-VIEW velocities at every ODE
+# step; a multi-timestamp scene fuses the per-FRAME velocities, each frame
+# evaluated on its own GT voxel grid (needs a per-frame GT_SHAPES_INVERSION mode).
+
+enabled: true
+strategy: canonical_unified
+inference_steps: 25
+
+visibility_min_weight: 0.001        # minimum per-view visibility weight
+fused_min_weight: 0.001             # minimum per-view fused weight
+
+# Velocity-level visibility weighting: per-view self-occlusion via DDA ray
+# tracing through the 64^3 occupancy grid; w = softmax(alpha * visibility).
+visibility_weighting: true
+visibility_alpha: 30.0               # softmax temperature for visibility weights
+visibility_neighbor_tolerance: 4.0   # ignore occluders within this voxel distance
+
+# Cross-attention bias: +alpha on attention logits for (voxel, patch) pairs
+# where the voxel projects onto that image patch (DDA visibility).  Improves
+# perceptual quality (LPIPS); stacks with rendering guidance below.
+visibility_attn_bias: true
+visibility_attn_bias_alpha: 5.0        # bias temperature: 0=no effect, 5=soft, 20=strong
+visibility_attn_bias_layers: all       # 'all' or comma-separated indices: '0,1,2', '-1,-2'
+# Which DINO conditioning streams get the bias
+visibility_attn_bias_cropped_image: true   # cropped object image [5:1374]
+visibility_attn_bias_full_image: true      # full scene image [1379:2748]
+visibility_attn_bias_cropped_mask: false   # cropped mask [2753:4122]
+visibility_attn_bias_full_mask: false      # full mask [4127:5496]
+# Compensate passive (un-biased) streams for the partition-function shift caused
+# by the +alpha bias on active streams:
+#   "off"    — no compensation.
+#   "approx" — subtract per-voxel c = log(v·exp(α)+(1−v)) from active streams;
+#              preserves passive and CLS shares under uniform logits.
+visibility_attn_bias_compensate_passive_streams: "approx"
+
+# In-ODE rendering guidance: at each ODE step decode the one-step Tweedie SLAT
+# estimate to Gaussians, render every frame, score it against GT
+# image/mask/depth and subtract the gradient from the velocity.
+rendering_guidance_active: true
+# With normalize_grad=true the step is a fraction of ‖v‖; 1.0 works best
+# (2 over-sharpens, >=4 diverges).
+rendering_guidance_velocity_weight: 1.0
+rendering_guidance_active_from: 0.0
+rendering_guidance_active_until: 1.0
+# Frames per render/backward chunk (0 = all at once).  Gradient-identical;
+# only peak activation memory changes.
+rendering_guidance_microbatch_size: 1
+# Integer downscale of GT + intrinsics for the guidance loss (1 = native).
+rendering_guidance_resolution_scale: 1
+# Rescale the rendering grad to ‖v‖ so the guidance stays subordinate to the
+# backbone velocity.
+rendering_guidance_normalize_grad: true
+# bf16 decoder forward inside guidance (outputs cast back to fp32).
+rendering_guidance_decoder_autocast_bf16: true
+# Fresh uniform RGB background per (ODE step, frame), shared by the render and
+# the GT compositing, so no fixed background is baked into the appearance.
+# seed=null → global RNG; an int gives run-reproducible colours.
+rendering_guidance_random_background: true
+rendering_guidance_random_background_seed: null
+# Stop-gradient Gaussians depth-occluded in EVERY frame (one extra no-grad
+# render per frame per step); occluded when z > z_surface * (1 + margin).
+rendering_guidance_visibility_detach: true
+rendering_guidance_visibility_depth_margin: 0.02
+
+save_ode_steps_viz: true
+
+# Loss weights — full LossConfig schema (struct mode needs every field
+# ``_compute_frame_loss`` may read).  Mirrors finetuning/canonical.yaml::losses
+# so guidance optimises the same objective as FINETUNE.
+rendering_guidance_losses:
+  num_iterations: 100
+  early_stop_patience: 0
+  lr_rotation: 0.01
+  lr_translation: 0.001
+  lr_scale: 0.0
+
+  rgb_weight: 1.0
+  rgb_multiscale: true
+  rgb_multiscale_scales: [1.0, 0.5, 0.25]
+  rgb_multiscale_weights: [0.5, 0.3, 0.2]
+  rgb_ssim_weight: 0.2
+
+  silhouette_weight: 0.0
+  silhouette_com_weight: 0.0
+  silhouette_sdt_weight: 0.0
+  silhouette_iou_weight: 1.0
+  occlusion_robust_silhouette: true
+
+  regularization_weight: 0.0
+
+  depth_weight: 0.1
+  depth_loss_type: l1
+  depth_mask_only: true
+
+  normals_weight: 0.01
+  normals_discontinuity_threshold: 0.02
+
+  perceptual_weight: 0.5
+  perceptual_crop_to_mask: true   # crop LPIPS to object bbox — VGG memory headroom
+  perceptual_crop_margin: 0.1     # bbox padding, fraction of extent per side
+  perceptual_autocast_bf16: false # bf16 LPIPS forward
+
+# Frames per batched backbone forward in the consensus ODE (dynamic path only).
+# A step costs 2*ceil(N/K) forwards instead of 2*N; frames of a step are
+# independent given the canonical latent, so batching changes only float
+# accumulation order.  null = one group.
+consensus_frame_chunk: null
+
+# Denoise on the GT voxelisation written by GT_SHAPES_INVERSION (required by
+# the dynamic path; skipped with a note when no GT shape is available).
+reset_shape_to_gt: true
+
+# Per-block output flags (null = inherit from global output config)
+save_renders: null
+save_metrics: null
+save_cache: null
+exit_after: false

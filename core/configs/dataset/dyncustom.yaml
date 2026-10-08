@@ -1,0 +1,10 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+
+name: dyncustom
+path: data/dyncustom
+scene_name: idling_elephant
+frame_index: null
+frame_stride: 1
+object_indices: null
+fps: 24
+downscale_factor: 1

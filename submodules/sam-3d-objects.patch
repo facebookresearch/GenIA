@@ -1,0 +1,520 @@
+diff --git a/sam3d_objects/model/backbone/generator/flow_matching/model.py b/sam3d_objects/model/backbone/generator/flow_matching/model.py
+index c76b7be..55fe2a8 100644
+--- a/sam3d_objects/model/backbone/generator/flow_matching/model.py
++++ b/sam3d_objects/model/backbone/generator/flow_matching/model.py
+@@ -209,7 +209,15 @@ class FlowMatching(Base):
+         x_0 = self._generate_noise(x_shape, x_device)
+         t_seq = self._prepare_t().to(x_device)
+ 
+-        for x_t, t in self._solver.solve_iter(
++        # noise_init_override: sets x_0 only (not frozen at every step)
++        noise_init_override = kwargs_conditionals.pop("noise_init_override", None)
++        if noise_init_override is not None:
++            if type(x_0) == dict:
++                x_0.update(noise_init_override)
++            else:
++                x_0 = noise_init_override
++
++        for x_t, t, _velocity in self._solver.solve_iter(
+             self._generate_dynamics,
+             x_0,
+             t_seq,
+@@ -348,7 +356,7 @@ class ConditionalFlowMatching(FlowMatching):
+                 else:
+                     x_0 = noise_override
+ 
+-        for x_t, t in self._solver.solve_iter(
++        for x_t, t, _velocity in self._solver.solve_iter(
+             self._generate_dynamics,
+             x_0,
+             t_seq,
+diff --git a/sam3d_objects/model/backbone/generator/flow_matching/solver.py b/sam3d_objects/model/backbone/generator/flow_matching/solver.py
+index ead1b58..40b5112 100644
+--- a/sam3d_objects/model/backbone/generator/flow_matching/solver.py
++++ b/sam3d_objects/model/backbone/generator/flow_matching/solver.py
+@@ -34,11 +34,11 @@ class ODESolver:
+         x_t = x_init
+         for t0, t1 in zip(times[:-1], times[1:]):
+             dt = t1 - t0
+-            x_t = self.step(dynamics_fn, x_t, t0, dt, *args, **kwargs)
+-            yield x_t, t0
++            x_t, velocity = self.step(dynamics_fn, x_t, t0, dt, *args, **kwargs)
++            yield x_t, t1, velocity
+ 
+     def solve(self, dynamics_fn, x_init, times, *args, **kwargs):
+-        for x_t, _ in self.solve_iter(dynamics_fn, x_init, times, *args, **kwargs):
++        for x_t, _, _velocity in self.solve_iter(dynamics_fn, x_init, times, *args, **kwargs):
+             pass
+         return x_t
+ 
+@@ -48,7 +48,7 @@ class Euler(ODESolver):
+     def step(self, dynamics_fn, x_t, t, dt, *args, **kwargs):
+         velocity = dynamics_fn(x_t, t, *args, **kwargs)
+         x_tp1 = linear_approximation_step(x_t, dt, velocity)
+-        return x_tp1
++        return x_tp1, velocity
+ 
+ 
+ # https://arxiv.org/abs/2505.05470
+@@ -79,7 +79,7 @@ class SDE(ODESolver):
+ 
+         prev_sample = tree_tensor_map(add_noise, prev_sample_mean)
+ 
+-        return prev_sample
++        return prev_sample, velocity
+ 
+ 
+ # https://en.wikipedia.org/wiki/Midpoint_method
+@@ -87,11 +87,11 @@ class Midpoint(ODESolver):
+     def step(self, dynamics_fn, x_t, t, dt, *args, **kwargs):
+         half_dt = 0.5 * dt
+ 
+-        x_mid = Euler.step(self, dynamics_fn, x_t, t, half_dt, *args, **kwargs)
++        x_mid, _velocity_half = Euler.step(self, dynamics_fn, x_t, t, half_dt, *args, **kwargs)
+ 
+         velocity_mid = dynamics_fn(x_mid, t + half_dt, *args, **kwargs)
+         x_tp1 = linear_approximation_step(x_t, dt, velocity_mid)
+-        return x_tp1
++        return x_tp1, velocity_mid
+ 
+ 
+ # https://en.wikipedia.org/wiki/Runge%E2%80%93Kutta_methods
+@@ -123,4 +123,4 @@ class RungeKutta4(ODESolver):
+ 
+         velocity_k = tree_tensor_map(compute_velocity, k1, k2, k3, k4)
+         x_tp1 = linear_approximation_step(x_t, dt, velocity_k)
+-        return x_tp1
++        return x_tp1, velocity_k
+diff --git a/sam3d_objects/model/backbone/generator/shortcut/model.py b/sam3d_objects/model/backbone/generator/shortcut/model.py
+index 4d93d62..bc443c0 100644
+--- a/sam3d_objects/model/backbone/generator/shortcut/model.py
++++ b/sam3d_objects/model/backbone/generator/shortcut/model.py
+@@ -41,6 +41,7 @@ class ShortCut(FlowMatching):
+         self.fm_eps_max = fm_eps_max
+         self.batch_mode = batch_mode
+         self.cfg_modalities = cfg_modalities
++        self._velocity_transform = None  # Optional callback(t, velocity_dict, x_t) -> velocity_dict
+ 
+     def _generate_d(self, x1):
+         """
+@@ -422,7 +423,18 @@ class ShortCut(FlowMatching):
+         x_0 = self._generate_noise(x_shape, x_device)
+         t_seq, d = self._prepare_t_and_d()
+ 
+-        for x_t, t in self._solver.solve_iter(
++        # noise_init_override: sets x_0 only (not frozen at every step)
++        noise_init_override = kwargs_conditionals.pop("noise_init_override", None)
++        if noise_init_override is not None:
++            if type(x_0) == dict:
++                x_0.update(noise_init_override)
++            else:
++                x_0 = noise_init_override
++
++        # step_callback: optional callable(t, x_t, velocity) invoked after each ODE step
++        step_callback = kwargs_conditionals.pop("step_callback", None)
++
++        for x_t, t, velocity in self._solver.solve_iter(
+             self._generate_dynamics,
+             x_0,
+             t_seq,
+@@ -430,6 +442,8 @@ class ShortCut(FlowMatching):
+             *args_conditionals,
+             **kwargs_conditionals,
+         ):
++            if step_callback is not None:
++                step_callback(t, x_t, velocity)
+             yield t, x_t, ()
+ 
+     def _generate_dynamics(
+@@ -441,10 +455,14 @@ class ShortCut(FlowMatching):
+         **kwargs_conditionals,
+     ):
+         """Generate dynamics for ODE solver"""
++        t_raw = t  # unscaled, 0-1 range — needed for velocity_transform
+         t = torch.tensor(
+             [t * self.time_scale], device=_get_device(x_t), dtype=torch.float32
+         )
+         d = torch.tensor(
+             [d * self.time_scale], device=_get_device(x_t), dtype=torch.float32
+         )
+-        return self.reverse_fn(x_t, t, *args_conditionals, d=d, **kwargs_conditionals)
++        velocity = self.reverse_fn(x_t, t, *args_conditionals, d=d, **kwargs_conditionals)
++        if self._velocity_transform is not None:
++            velocity = self._velocity_transform(t_raw, velocity, x_t)
++        return velocity
+diff --git a/sam3d_objects/model/backbone/tdfy_dit/modules/attention/__init__.py b/sam3d_objects/model/backbone/tdfy_dit/modules/attention/__init__.py
+index 14053c1..f93a724 100755
+--- a/sam3d_objects/model/backbone/tdfy_dit/modules/attention/__init__.py
++++ b/sam3d_objects/model/backbone/tdfy_dit/modules/attention/__init__.py
+@@ -2,7 +2,7 @@
+ from typing import *
+ from loguru import logger
+ 
+-BACKEND = "sdpa"
++BACKEND = "xformers"
+ DEBUG = False
+ 
+ 
+diff --git a/sam3d_objects/model/backbone/tdfy_dit/modules/sparse/__init__.py b/sam3d_objects/model/backbone/tdfy_dit/modules/sparse/__init__.py
+index 1abbeeb..8855771 100755
+--- a/sam3d_objects/model/backbone/tdfy_dit/modules/sparse/__init__.py
++++ b/sam3d_objects/model/backbone/tdfy_dit/modules/sparse/__init__.py
+@@ -5,7 +5,7 @@ from loguru import logger
+ BACKEND = "spconv"
+ # BACKEND = "torchsparse"
+ DEBUG = False
+-ATTN = "sdpa"
++ATTN = "xformers"
+ 
+ 
+ def __from_env():
+diff --git a/sam3d_objects/model/backbone/tdfy_dit/modules/sparse/attention/full_attn.py b/sam3d_objects/model/backbone/tdfy_dit/modules/sparse/attention/full_attn.py
+index 1149b1e..4d376c7 100755
+--- a/sam3d_objects/model/backbone/tdfy_dit/modules/sparse/attention/full_attn.py
++++ b/sam3d_objects/model/backbone/tdfy_dit/modules/sparse/attention/full_attn.py
+@@ -106,7 +106,7 @@ def sparse_scaled_dot_product_attention(
+     ...
+ 
+ 
+-def sparse_scaled_dot_product_attention(*args, **kwargs):
++def sparse_scaled_dot_product_attention(*args, attn_bias=None, **kwargs):
+     arg_names_dict = {1: ["qkv"], 2: ["q", "kv"], 3: ["q", "k", "v"]}
+     num_all_args = len(args) + len(kwargs)
+     assert (
+@@ -264,8 +264,18 @@ def sparse_scaled_dot_product_attention(*args, **kwargs):
+         q = q.unsqueeze(0)
+         k = k.unsqueeze(0)
+         v = v.unsqueeze(0)
+-        mask = xops.fmha.BlockDiagonalMask.from_seqlens(q_seqlen, kv_seqlen)
+-        out = xops.memory_efficient_attention(q, k, v, mask)[0]
++        if attn_bias is not None:
++            # Per-view xformers MEA loop with additive bias: keeps the fused kernel
++            # (no dense (sum_q, sum_kv) score/mask/bias materialization).
++            from .masked_sdpa import xops_blockdiag_with_bias
++            out = xops_blockdiag_with_bias(q, k, v, q_seqlen, kv_seqlen, attn_bias)
++        else:
++            mask = xops.fmha.BlockDiagonalMask.from_seqlens(q_seqlen, kv_seqlen)
++            out = xops.memory_efficient_attention(q, k, v, mask)[0]
++    elif attn_bias is not None:
++        raise NotImplementedError(
++            f"additive attention bias needs the xformers backend, not {ATTN!r}"
++        )
+     elif ATTN == "flash_attn":
+         cu_seqlens_q = (
+             torch.cat([torch.tensor([0]), torch.cumsum(torch.tensor(q_seqlen), dim=0)])
+diff --git a/sam3d_objects/model/backbone/tdfy_dit/modules/sparse/attention/masked_sdpa.py b/sam3d_objects/model/backbone/tdfy_dit/modules/sparse/attention/masked_sdpa.py
+index 2348970..c6f01d7 100644
+--- a/sam3d_objects/model/backbone/tdfy_dit/modules/sparse/attention/masked_sdpa.py
++++ b/sam3d_objects/model/backbone/tdfy_dit/modules/sparse/attention/masked_sdpa.py
+@@ -58,3 +58,99 @@ def masked_sdpa(q, k, v, q_seqlen, kv_seqlen):
+     out = out.permute(0, 2, 1, 3)
+ 
+     return out[0]
++
++
++def _is_stacked_bias(attn_bias: torch.Tensor, N: int) -> bool:
++    """Detect ``(N, H, L_per_view, P_per_view)`` stacked layout vs the
++    legacy ``(1, H, L_or_sum_q, P_or_sum_kv)`` packed/template layout.
++
++    The two shapes are indistinguishable when ``N == 1`` (both have
++    ``shape[0] == 1``); we conservatively treat that case as packed,
++    matching the original behaviour. Callers that build single-view
++    stacked biases get the same result either way (one block).
++    """
++    return attn_bias.shape[0] == N and attn_bias.shape[0] != 1
++
++
++def _slice_view_bias(
++    attn_bias: torch.Tensor,
++    i: int,
++    q_ofs: int,
++    kv_ofs: int,
++    q_len: int,
++    kv_len: int,
++    *,
++    stacked: bool,
++) -> torch.Tensor:
++    """Return the bias slice corresponding to view ``i`` in the per-view
++    loop. ``stacked`` selects between the two storage layouts; see
++    :func:`_is_stacked_bias`."""
++    if stacked:
++        return attn_bias[i:i + 1, :, :q_len, :kv_len]
++    return attn_bias[:, :, q_ofs:q_ofs + q_len, kv_ofs:kv_ofs + kv_len]
++
++
++def xops_blockdiag_with_bias(q, k, v, q_seqlen, kv_seqlen, attn_bias):
++    """xformers MEA per view-block with additive bias.
++
++    Streams biased block-diagonal attention through the fused cutlass kernel — never materializes
++    the dense (sum_q, sum_kv) score / mask / bias tensors that drove the
++    APPEARANCE_INIT_2 OOM. Each view's bias slice is at most
++    ``L_per_view * P_per_view * dtype_bytes`` and only one is live at a time.
++
++    Args:
++        q, k, v: ``(1, sum_L, H, D)`` packed tensors. q is along queries,
++                 k/v along keys; same layout the existing xformers
++                 ``BlockDiagonalMask`` path expects.
++        q_seqlen / kv_seqlen: per-view query / key lengths (must align with
++                 the bias's block-diagonal layout — see invariant note).
++        attn_bias: additive bias in either of two forms:
++            - ``(N, 1 or H, L_per_view, P_per_view)``: stacked per-view
++              storage (preferred — N× smaller than packed dense form).
++            - ``(1, 1 or H, sum_q, sum_kv)``: legacy packed dense form.
++            Detected by ``attn_bias.shape[0] == len(q_seqlen)`` for the
++            stacked case.
++
++    Returns:
++        ``(sum_q, H, D)`` — same layout as ``masked_sdpa``.
++
++    Invariant: ``q_seqlen`` / ``kv_seqlen`` partition the packed tensors in
++    the same view order ``SparseVisibilityBiasHook._build_bias`` uses.
++
++    Errors from the underlying ``xops.memory_efficient_attention`` propagate
++    unmodified.
++    """
++
++    import xformers.ops as xops
++
++    target_dtype = q.dtype
++    H = q.shape[-2]
++    N = len(q_seqlen)
++    stacked = _is_stacked_bias(attn_bias, N)
++    outs = []
++    q_ofs = 0
++    kv_ofs = 0
++    for i, (q_len, kv_len) in enumerate(zip(q_seqlen, kv_seqlen)):
++        qi = q[:, q_ofs:q_ofs + q_len].contiguous()
++        ki = k[:, kv_ofs:kv_ofs + kv_len].contiguous()
++        vi = v[:, kv_ofs:kv_ofs + kv_len].contiguous()
++        bi = _slice_view_bias(
++            attn_bias, i, q_ofs, kv_ofs, q_len, kv_len, stacked=stacked,
++        ).to(target_dtype)
++        # cutlass MEA requires the kv-dim to be a multiple of 8 in fp16/bf16
++        pad = (-kv_len) % 8
++        if pad:
++            ki = F.pad(ki, (0, 0, 0, 0, 0, pad))
++            vi = F.pad(vi, (0, 0, 0, 0, 0, pad))
++            bi = F.pad(bi, (0, pad), value=float("-inf"))
++        # cutlass MEA requires (1, H, Q, K) — no broadcasting over the head
++        # dim. Expand and materialize (stride-0 expand passes shape check but
++        # not all kernel paths honor it).
++        if bi.shape[1] == 1 and H > 1:
++            bi = bi.expand(-1, H, -1, -1)
++        bi = bi.contiguous()
++        out_i = xops.memory_efficient_attention(qi, ki, vi, attn_bias=bi)[0]
++        outs.append(out_i)
++        q_ofs += q_len
++        kv_ofs += kv_len
++    return torch.cat(outs, dim=0)
+diff --git a/sam3d_objects/model/backbone/tdfy_dit/modules/sparse/attention/modules.py b/sam3d_objects/model/backbone/tdfy_dit/modules/sparse/attention/modules.py
+index 175e12f..07ed3af 100755
+--- a/sam3d_objects/model/backbone/tdfy_dit/modules/sparse/attention/modules.py
++++ b/sam3d_objects/model/backbone/tdfy_dit/modules/sparse/attention/modules.py
+@@ -126,6 +126,7 @@ class SparseMultiHeadAttention(nn.Module):
+         self,
+         x: Union[SparseTensor, torch.Tensor],
+         context: Optional[Union[SparseTensor, torch.Tensor]] = None,
++        attn_bias: Optional[torch.Tensor] = None,
+     ) -> Union[SparseTensor, torch.Tensor]:
+         if self._type == "self":
+             qkv = self._linear(self.to_qkv, x)
+@@ -161,7 +162,7 @@ class SparseMultiHeadAttention(nn.Module):
+                 k, v = kv.unbind(dim=1)
+                 k = self.k_rms_norm(k)
+                 kv = kv.replace(torch.stack([k.feats, v.feats], dim=1))
+-            h = sparse_scaled_dot_product_attention(q, kv)
++            h = sparse_scaled_dot_product_attention(q, kv, attn_bias=attn_bias)
+         h = self._reshape_chs(h, (-1,))
+         h = self._linear(self.to_out, h)
+         return h
+diff --git a/sam3d_objects/model/backbone/tdfy_dit/modules/sparse/conv/conv_spconv.py b/sam3d_objects/model/backbone/tdfy_dit/modules/sparse/conv/conv_spconv.py
+index f54a6c4..11e37e3 100755
+--- a/sam3d_objects/model/backbone/tdfy_dit/modules/sparse/conv/conv_spconv.py
++++ b/sam3d_objects/model/backbone/tdfy_dit/modules/sparse/conv/conv_spconv.py
+@@ -57,7 +57,14 @@ class SparseConv3d(nn.Module):
+ 
+     def forward(self, x: SparseTensor) -> SparseTensor:
+         spatial_changed = any(s != 1 for s in self.stride) or (self.padding is not None)
+-        new_data = self.conv(x.data)
++        data = x.data
++        if data.features.dtype != self.conv.weight.dtype:
++            # spconv has no bf16/autocast kernels ("can't find suitable
++            # algorithm") — under torch.autocast the upstream linears emit
++            # bf16 features; run the conv in the weight dtype (fp32) and hand
++            # the result back to the autocast region.
++            data = data.replace_feature(data.features.to(self.conv.weight.dtype))
++        new_data = self.conv(data)
+         new_shape = [x.shape[0], self.conv.out_channels]
+         new_layout = None if spatial_changed else x.layout
+ 
+@@ -126,6 +133,9 @@ class SparseInverseConv3d(nn.Module):
+         else:
+             data = x.data
+ 
++        if data.features.dtype != self.conv.weight.dtype:
++            # See SparseConv3d.forward — spconv has no bf16/autocast kernels.
++            data = data.replace_feature(data.features.to(self.conv.weight.dtype))
+         new_data = self.conv(data)
+         new_shape = [x.shape[0], self.conv.out_channels]
+         new_layout = None if spatial_changed else x.layout
+diff --git a/sam3d_objects/model/backbone/tdfy_dit/representations/gaussian/gaussian_model.py b/sam3d_objects/model/backbone/tdfy_dit/representations/gaussian/gaussian_model.py
+index e288730..8936817 100755
+--- a/sam3d_objects/model/backbone/tdfy_dit/representations/gaussian/gaussian_model.py
++++ b/sam3d_objects/model/backbone/tdfy_dit/representations/gaussian/gaussian_model.py
+@@ -91,7 +91,7 @@ class Gaussian:
+     @property
+     def get_features(self):
+         return (
+-            torch.cat((self._features_dc, self._features_rest), dim=2)
++            torch.cat((self._features_dc, self._features_rest), dim=1)
+             if self._features_rest is not None
+             else self._features_dc
+         )
+diff --git a/sam3d_objects/model/backbone/tdfy_dit/representations/mesh/flexicubes/flexicubes.py b/sam3d_objects/model/backbone/tdfy_dit/representations/mesh/flexicubes/flexicubes.py
+index 583b5e3..49e6132 100644
+--- a/sam3d_objects/model/backbone/tdfy_dit/representations/mesh/flexicubes/flexicubes.py
++++ b/sam3d_objects/model/backbone/tdfy_dit/representations/mesh/flexicubes/flexicubes.py
+@@ -15,7 +15,6 @@
+ # limitations under the License.
+ import torch
+ from .tables import *
+-from kaolin.utils.testing import check_tensor
+ 
+ __all__ = [
+     'FlexiCubes'
+@@ -56,29 +55,6 @@ class FlexiCubes:
+ 
+     def __call__(self, voxelgrid_vertices, scalar_field, cube_idx, resolution, qef_reg_scale=1e-3,
+                  weight_scale=0.99, beta=None, alpha=None, gamma_f=None, voxelgrid_colors=None, training=False):
+-        assert torch.is_tensor(voxelgrid_vertices) and \
+-            check_tensor(voxelgrid_vertices, (None, 3), throw=False), \
+-            "'voxelgrid_vertices' should be a tensor of shape (num_vertices, 3)"
+-        num_vertices = voxelgrid_vertices.shape[0]
+-        assert torch.is_tensor(scalar_field) and \
+-            check_tensor(scalar_field, (num_vertices,), throw=False), \
+-            "'scalar_field' should be a tensor of shape (num_vertices,)"
+-        assert torch.is_tensor(cube_idx) and \
+-            check_tensor(cube_idx, (None, 8), throw=False), \
+-            "'cube_idx' should be a tensor of shape (num_cubes, 8)"
+-        num_cubes = cube_idx.shape[0]
+-        assert beta is None or (
+-            torch.is_tensor(beta) and
+-            check_tensor(beta, (num_cubes, 12), throw=False)
+-        ), "'beta' should be a tensor of shape (num_cubes, 12)"
+-        assert alpha is None or (
+-            torch.is_tensor(alpha) and
+-            check_tensor(alpha, (num_cubes, 8), throw=False)
+-        ), "'alpha' should be a tensor of shape (num_cubes, 8)"
+-        assert gamma_f is None or (
+-            torch.is_tensor(gamma_f) and
+-            check_tensor(gamma_f, (num_cubes,), throw=False)
+-        ), "'gamma_f' should be a tensor of shape (num_cubes,)"
+ 
+         surf_cubes, occ_fx8 = self._identify_surf_cubes(scalar_field, cube_idx)
+         if surf_cubes.sum() == 0:
+diff --git a/sam3d_objects/pipeline/inference_pipeline.py b/sam3d_objects/pipeline/inference_pipeline.py
+index d34d5c2..cee38d4 100644
+--- a/sam3d_objects/pipeline/inference_pipeline.py
++++ b/sam3d_objects/pipeline/inference_pipeline.py
+@@ -8,20 +8,6 @@ from functools import wraps
+ from torch.utils._pytree import tree_map_only
+ 
+ 
+-def set_attention_backend():
+-    if torch.cuda.is_available():
+-        gpu_name = torch.cuda.get_device_name(0)
+-    else:
+-        gpu_name = "CPU"
+-
+-    logger.info(f"GPU name is {gpu_name}")
+-    if "A100" in gpu_name or "H100" in gpu_name or "H200" in gpu_name:
+-        # logger.info("Use flash_attn")
+-        os.environ["ATTN_BACKEND"] = "flash_attn"
+-        os.environ["SPARSE_ATTN_BACKEND"] = "flash_attn"
+-
+-set_attention_backend()
+-
+ from typing import List, Union
+ from hydra.utils import instantiate
+ from omegaconf import OmegaConf
+diff --git a/sam3d_objects/pipeline/layout_post_optimization_utils.py b/sam3d_objects/pipeline/layout_post_optimization_utils.py
+index b5736c4..2e18636 100644
+--- a/sam3d_objects/pipeline/layout_post_optimization_utils.py
++++ b/sam3d_objects/pipeline/layout_post_optimization_utils.py
+@@ -21,7 +21,10 @@ from scipy.ndimage import label, binary_dilation, binary_fill_holes, binary_eros
+ import copy
+ from sam3d_objects.model.backbone.tdfy_dit.renderers.gaussian_render import GaussianRenderer
+ from loguru import logger
+-from utils3d.numpy import depth_edge
++try:
++    from utils3d.numpy import depth_edge
++except ImportError:  # utils3d >= 1.x (pinned by MoGe-2) renamed it
++    from utils3d.numpy import depth_map_edge as depth_edge
+ 
+ def remove_small_regions(mask, min_area=100):
+     """
+diff --git a/sam3d_objects/pipeline/utils/pointmap.py b/sam3d_objects/pipeline/utils/pointmap.py
+index 82a2e5e..7b7c13e 100644
+--- a/sam3d_objects/pipeline/utils/pointmap.py
++++ b/sam3d_objects/pipeline/utils/pointmap.py
+@@ -83,7 +83,7 @@ def infer_intrinsics_from_pointmap(
+             _, shift = recover_focal_shift(points, mask_binary, focal=focal)
+         fx = focal / 2 * (1 + aspect_ratio ** 2) ** 0.5 / aspect_ratio
+         fy = focal / 2 * (1 + aspect_ratio ** 2) ** 0.5 
+-        intrinsics = utils3d.torch.intrinsics_from_focal_center(fx, fy, 0.5, 0.5)
++        intrinsics = utils3d.torch.intrinsics_from_focal_center(fx.item(), fy.item(), 0.5, 0.5)
+         depth = points[..., 2] + shift[..., None, None]
+         
+         # If projection constraint is forced, recompute the point map using the actual depth map
+diff --git a/sam3d_objects/utils/visualization/image_mesh.py b/sam3d_objects/utils/visualization/image_mesh.py
+index 81f996f..6d366f0 100644
+--- a/sam3d_objects/utils/visualization/image_mesh.py
++++ b/sam3d_objects/utils/visualization/image_mesh.py
+@@ -6,13 +6,40 @@ import torch
+ from pytorch3d.structures import Meshes
+ from pytorch3d.renderer.mesh.textures import TexturesVertex
+ 
+-from utils3d.numpy import (
+-    depth_edge,
+-    normals_edge,
+-    points_to_normals,
+-    image_uv,
+-    image_mesh,
+-)
++try:
++    # utils3d 0.0.2 (sam3d-objects env)
++    from utils3d.numpy import (
++        depth_edge,
++        normals_edge,
++        points_to_normals,
++        image_uv,
++        image_mesh,
++    )
++except ImportError:
++    # utils3d >= 1.x (pinned by MoGe-2) renamed these maps
++    # helpers. Provide the 0.0.2 names as thin adapters. Only
++    # SceneVisualizer.object_pointcloud is on the pipeline's critical path and it
++    # uses none of these; the adapters keep the depth->mesh viz importable/working.
++    from utils3d.numpy import (
++        depth_map_edge as depth_edge,
++        normal_map_edge as normals_edge,
++        point_map_to_normal_map as _point_map_to_normal_map,
++        uv_map as _uv_map,
++        build_mesh_from_map as _build_mesh_from_map,
++    )
++
++    def points_to_normals(point, mask=None):
++        # 0.0.2 returned (normals, valid_mask); 1.x returns only normals.
++        normals = _point_map_to_normal_map(point, mask=mask)
++        if mask is None:
++            mask = np.ones(point.shape[:-1], dtype=bool)
++        return normals, mask
++
++    def image_uv(height, width, **kwargs):
++        return _uv_map((height, width))
++
++    def image_mesh(*image_attrs, **kwargs):
++        return _build_mesh_from_map(*image_attrs, **kwargs)
+ 
+ np.acos = np.arccos  # sam3d_objects-3dfy version of numpy doesn't have acos
+ 
