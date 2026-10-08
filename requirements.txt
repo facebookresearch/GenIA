@@ -37,7 +37,7 @@ tifffile
 timm==1.0.24
 torchmetrics==1.8.2
 tqdm==4.67.1
-transformers==4.57.6
+transformers==5.10.1
 trimesh==4.10.1
 xatlas==0.0.9
 # lightning 2.3 imports pkg_resources, which setuptools>=81 no longer ships.
