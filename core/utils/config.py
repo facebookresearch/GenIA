@@ -191,6 +191,36 @@ class ProcessingConfig:
     the recon cache key, but only when non-default.
     """
 
+    native_conditioning: bool = False
+    """Condition SAM3D (stages 1 and 2) on
+    native pixels instead of the backend's (H', W') input crop
+    (``Sequence.conditioning_source``): the same field of view, strided by
+    ``dataset.downscale_factor`` and capped by ``native_resolution_max_scale``.  Depth,
+    pointmap, the frames' K and every render/loss target stay at (H', W'); SAM3D resizes
+    its pointmap onto the image grid itself.  A no-op where nothing was cropped
+    (``ground_truth``).  Off by default, as in the initial release."""
+
+    native_supervision: bool = False
+    """Render the photometric targets (Stage-2 rendering guidance, the pose refines,
+    FINETUNE) at native resolution (``Sequence.render_source``, the same pixels as
+    ``native_conditioning``) instead of the backend's (H', W') input crop.  Depth, valid
+    mask and normals never exceed (H', W'): the depth and normal terms compare the render
+    resampled onto that grid (``refinement._match_depth_grid``).  A no-op where nothing was
+    cropped (``ground_truth``).  Off by default, as in the initial release."""
+
+    native_resolution_max_scale: float = 2.0
+    """Cap the native conditioning / render image's long side at this many multiples of
+    ``recon_resolution_set`` (render + backward cost scales with pixel count)."""
+
+    precomputed_geometry: Optional[str] = None
+    """With ``reconstruction_model='precomputed'``: the ``{asset: ReconResult}`` file
+    (``recon_cache`` format) holding depth + cameras another tool reconstructed, read in
+    place of a map-anything forward. Any filtering was the producer's."""
+
+    precomputed_model: Optional[str] = None
+    """Which backend produced ``precomputed_geometry`` (e.g. ``da3``). Provenance only,
+    so a run's config.yaml names the geometry it was actually given."""
+
     cache_reconstruction: bool = False
     """Cache map-anything's depth per scene at ``{dataset.path}/{scene}/ma_cache``.
 

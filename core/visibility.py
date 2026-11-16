@@ -170,6 +170,55 @@ def compute_visibility_for_all_views(
     return visibility_matrix
 
 
+#: PyTorch3D's coarse rasterizer refuses more bins than this along an image side.
+_MAX_BINS_PER_SIDE = 22
+
+
+def _coarse_raster_budget(verts: np.ndarray, faces: np.ndarray, K: np.ndarray,
+                          H: int, W: int, bin_size: int = 64) -> Tuple[int, int]:
+    """``(bin_size, max_faces_per_bin)`` for PyTorch3D's coarse-to-fine rasterizer that no
+    bin can overflow.  An overflow drops faces SILENTLY (the kernel only prints), so the
+    budget is an upper bound on every bin's face count rather than a guess: each face's
+    pixel bounding box (R3 camera ``verts``, intrinsics ``K``) widened by one bin on every
+    side, plus the principal point's offset from the centre (the camera is built with negated
+    focals, so the kernel's grid may be this one mirrored about ``2 c - size``), faces reaching
+    ``z <= 0`` counted in every bin, and the maximum taken over the four mirrorings of the
+    grid (whatever pixel orientation the kernel bins in).  The budget sets only how much the
+    kernel allocates and scans per bin, so the fragments are those of an unbounded budget, at a
+    fraction of its cost.  ``bin_size`` grows
+    past 64 only to respect :data:`_MAX_BINS_PER_SIDE`."""
+    while -(-max(H, W) // bin_size) >= _MAX_BINS_PER_SIDE:
+        bin_size *= 2
+    nby, nbx = -(-H // bin_size), -(-W // bin_size)
+    mgx = 1 + int(np.ceil(abs(2 * K[0, 2] - W) / bin_size))
+    mgy = 1 + int(np.ceil(abs(2 * K[1, 2] - H) / bin_size))
+    z = verts[:, 2]
+    with np.errstate(divide="ignore", invalid="ignore"):
+        u = K[0, 0] * verts[:, 0] / z + K[0, 2]
+        v = K[1, 1] * verts[:, 1] / z + K[1, 2]
+    fu, fv, fz = u[faces], v[faces], z[faces]                 # (F, 3) each
+    behind = (fz <= 1e-6).any(1)
+    best = 1
+    for mx in (False, True):
+        for my in (False, True):
+            uu = (W - fu) if mx else fu
+            vv = (H - fv) if my else fv
+            x0 = np.where(behind, 0, np.floor(uu.min(1) / bin_size) - mgx)
+            x1 = np.where(behind, nbx - 1, np.floor(uu.max(1) / bin_size) + mgx)
+            y0 = np.where(behind, 0, np.floor(vv.min(1) / bin_size) - mgy)
+            y1 = np.where(behind, nby - 1, np.floor(vv.max(1) / bin_size) + mgy)
+            keep = (x1 >= 0) & (x0 <= nbx - 1) & (y1 >= 0) & (y0 <= nby - 1)
+            x0, x1 = (np.clip(a[keep], 0, nbx - 1).astype(int) for a in (x0, x1))
+            y0, y1 = (np.clip(a[keep], 0, nby - 1).astype(int) for a in (y0, y1))
+            diff = np.zeros((nby + 1, nbx + 1), np.int64)     # 2D difference array of the boxes
+            np.add.at(diff, (y0, x0), 1)
+            np.add.at(diff, (y0, x1 + 1), -1)
+            np.add.at(diff, (y1 + 1, x0), -1)
+            np.add.at(diff, (y1 + 1, x1 + 1), 1)
+            best = max(best, int(diff.cumsum(0).cumsum(1)[:nby, :nbx].max(initial=0)))
+    return bin_size, best
+
+
 def _rasterize_scene(
     objects_data: dict,
     R_cache: dict,
@@ -273,11 +322,14 @@ def _rasterize_scene(
         in_ndc=False,
         device=device,
     )
+    # Coarse-to-fine (binned) rasterization with a budget no bin can overflow (an overflow
+    # silently drops faces): the same fragments as the naive `bin_size=0` kernel, faster.
+    bin_size, max_faces_per_bin = _coarse_raster_budget(all_verts, all_faces, K, H, W)
     rasterizer = MeshRasterizer(
         cameras=cameras,
         raster_settings=RasterizationSettings(
             image_size=(H, W), blur_radius=0.0,
-            faces_per_pixel=1, bin_size=0,
+            faces_per_pixel=1, bin_size=bin_size, max_faces_per_bin=max_faces_per_bin,
         ),
     )
 
@@ -343,8 +395,7 @@ def compute_visibility_multi_object(
         Each ``view_map`` is ``{voxel_idx: (M, 2) int}`` — the set of
         ``(row, col)`` pixel coordinates where that voxel is visible
         (rasterized surface pixels whose face belongs to this voxel), or
-        at least its projected centre pixel when rasterization misses it
-        (always the case for a single object, which is not rasterized).
+        at least its projected centre pixel when rasterization misses it.
     """
     from pytorch3d.transforms import quaternion_to_matrix
 
@@ -388,7 +439,6 @@ def compute_visibility_multi_object(
         pixel_coords[oi] = [{} for _ in range(N_views)]
 
     H, W = image_height, image_width
-    single_object = len(obj_indices) == 1
 
     for view_idx in range(N_views):
         K = np.asarray(K_matrices[view_idx], dtype=np.float64)
@@ -428,7 +478,7 @@ def compute_visibility_multi_object(
                 coords_int, cam_arr, occupancy, grid_size, tolerance_sq,
             )
 
-            # Screen projection (for single-object in-bounds check).
+            # Screen projection (centre pixel, depth-test lookups).
             canonical = (coords.astype(np.float64) + 0.5) / grid_size - 0.5
             cam = canonical * sc @ R + trans
             z = cam[:, 2].copy()
@@ -442,87 +492,76 @@ def compute_visibility_multi_object(
             proj_z[oi] = z
 
         # ── Cross-object occlusion ──────────────────────────────────
-        if single_object:
-            # No cross-object occlusion; just DDA + in-bounds.
-            oi = obj_indices[0]
+        # Rasterize all objects' voxel meshes → scene depth + maps (a single object
+        # too, so it behaves exactly as several: footprint pixels, depth-buffer test)
+        zbuf, obj_map, voxel_map = _rasterize_scene(
+            objects_data, R_cache, trans_cache, scale_cache,
+            view_idx, K, H, W, grid_size,
+        )
+
+        # Min-filter the depth buffer to fill sub-pixel gaps
+        from scipy.ndimage import minimum_filter
+        zbuf_valid = np.where(zbuf > 0, zbuf, np.inf)
+        zbuf_min = minimum_filter(zbuf_valid, size=3)
+
+        # Combine: DDA visible AND in-bounds AND not cross-occluded
+        for oi in obj_indices:
+            u_arr = proj_u[oi]
+            v_arr = proj_v[oi]
+            z_arr = proj_z[oi]
+            sc = scale_cache[(oi, view_idx)]
+
             in_bounds = (
-                (proj_u[oi] >= 0) & (proj_u[oi] < W)
-                & (proj_v[oi] >= 0) & (proj_v[oi] < H)
-                & (proj_z[oi] > 0)
+                (u_arr >= 0) & (u_arr < W)
+                & (v_arr >= 0) & (v_arr < H)
+                & (z_arr > 0)
             )
-            result[oi][view_idx] = (
-                dda_vis[oi] * in_bounds.astype(np.float32)
-            )
-        else:
-            # Rasterize all objects' voxel meshes → scene depth + maps
-            zbuf, obj_map, voxel_map = _rasterize_scene(
-                objects_data, R_cache, trans_cache, scale_cache,
-                view_idx, K, H, W, grid_size,
-            )
+            idx = np.where(in_bounds & (dda_vis[oi] > 0.5))[0]
 
-            # Min-filter the depth buffer to fill sub-pixel gaps
-            from scipy.ndimage import minimum_filter
-            zbuf_valid = np.where(zbuf > 0, zbuf, np.inf)
-            zbuf_min = minimum_filter(zbuf_valid, size=3)
-
-            # Combine: DDA visible AND in-bounds AND not cross-occluded
-            for oi in obj_indices:
-                u_arr = proj_u[oi]
-                v_arr = proj_v[oi]
-                z_arr = proj_z[oi]
-                sc = scale_cache[(oi, view_idx)]
-
-                in_bounds = (
-                    (u_arr >= 0) & (u_arr < W)
-                    & (v_arr >= 0) & (v_arr < H)
-                    & (z_arr > 0)
+            if len(idx) > 0:
+                depth_tol = (
+                    np.max(sc) / grid_size * neighbor_tolerance
                 )
-                idx = np.where(in_bounds & (dda_vis[oi] > 0.5))[0]
+                nearest_z = zbuf_min[v_arr[idx], u_arr[idx]]
+                not_occluded = (
+                    (nearest_z == np.inf)
+                    | (z_arr[idx] <= nearest_z + depth_tol)
+                )
+                vis_voxels = np.unique(idx[not_occluded])
+                result[oi][view_idx, vis_voxels] = 1.0
 
-                if len(idx) > 0:
-                    depth_tol = (
-                        np.max(sc) / grid_size * neighbor_tolerance
-                    )
-                    nearest_z = zbuf_min[v_arr[idx], u_arr[idx]]
-                    not_occluded = (
-                        (nearest_z == np.inf)
-                        | (z_arr[idx] <= nearest_z + depth_tol)
-                    )
-                    vis_voxels = np.unique(idx[not_occluded])
-                    result[oi][view_idx, vis_voxels] = 1.0
-
-            # Build voxel → pixel mapping from rasterized obj_map/voxel_map
-            for oi in obj_indices:
-                rast_mask = obj_map == oi
-                if not rast_mask.any():
-                    continue
-                rows, cols = np.where(rast_mask)
-                vox_ids = voxel_map[rast_mask]
-                # Only include pixels whose voxel is marked visible
-                vis_mask = result[oi][view_idx, vox_ids] > 0.5
-                rows, cols, vox_ids = rows[vis_mask], cols[vis_mask], vox_ids[vis_mask]
-                pix_map = pixel_coords[oi][view_idx]
-                for vid in np.unique(vox_ids):
-                    sel = vox_ids == vid
-                    pix_map[int(vid)] = np.stack(
-                        [rows[sel], cols[sel]], axis=1,
-                    )
+        # Build voxel → pixel mapping from rasterized obj_map/voxel_map
+        for oi in obj_indices:
+            rast_mask = obj_map == oi
+            if not rast_mask.any():
+                continue
+            rows, cols = np.where(rast_mask)
+            vox_ids = voxel_map[rast_mask]
+            # Only include pixels whose voxel is marked visible
+            vis_mask = result[oi][view_idx, vox_ids] > 0.5
+            rows, cols, vox_ids = rows[vis_mask], cols[vis_mask], vox_ids[vis_mask]
+            # One stable sort, then split per voxel: each voxel keeps its pixels in
+            # raster order, keys ascend -- what a per-voxel `vox_ids == vid` scan
+            # gives, without its (voxels x pixels) cost.
+            order = np.argsort(vox_ids, kind="stable")
+            vids, starts = np.unique(vox_ids[order], return_index=True)
+            rc = np.stack([rows[order], cols[order]], axis=1)
+            pix_map = pixel_coords[oi][view_idx]
+            for vid, chunk in zip(vids.tolist(), np.split(rc, starts[1:])):
+                pix_map[vid] = chunk
 
         # ── Pixel coords fallback ──────────────────────────────────
         # Ensure all visible voxels have at least their projected center
-        # in pixel_coords.  The rasterization path can miss voxels whose
-        # surface faces are sub-pixel; the single-object path has no
-        # rasterization at all.
+        # in pixel_coords: rasterization can miss voxels whose surface faces
+        # are sub-pixel.
         for oi in obj_indices:
             vis_voxels = np.where(result[oi][view_idx] > 0.5)[0]
             pix_map = pixel_coords[oi][view_idx]
-            u_arr = proj_u[oi]
-            v_arr = proj_v[oi]
-            for vid in vis_voxels:
-                if int(vid) not in pix_map:
-                    u, v = int(u_arr[vid]), int(v_arr[vid])
-                    if 0 <= u < W and 0 <= v < H:
-                        pix_map[int(vid)] = np.array([[v, u]], dtype=np.int64)
+            missing = vis_voxels[~np.isin(vis_voxels, list(pix_map))]
+            u_arr, v_arr = proj_u[oi][missing], proj_v[oi][missing]
+            ok = (u_arr >= 0) & (u_arr < W) & (v_arr >= 0) & (v_arr < H)
+            for vid, u, v in zip(missing[ok].tolist(), u_arr[ok].tolist(), v_arr[ok].tolist()):
+                pix_map[vid] = np.array([[v, u]], dtype=np.int64)
 
         for oi in obj_indices:
             n_vis = int(result[oi][view_idx].sum())

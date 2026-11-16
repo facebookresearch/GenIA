@@ -48,21 +48,22 @@ def fk_str(fk) -> str:
     return str(tuple(fk)) if hasattr(fk, "__iter__") else str(fk)
 
 
-def _masked_rgba(frame_data, obj_idx):
-    """RGBA PIL image of one object in a frame (RGB + alpha = its GT mask), or
-    ``None`` when the object's mask is empty in this frame."""
+def _masked_rgba(image, mask):
+    """RGBA PIL image of one object (RGB + alpha = its GT mask), or ``None`` when the
+    mask is empty."""
     from PIL import Image
 
-    mask = np.asarray(frame_data.masks[obj_idx]).astype(bool)
+    mask = np.asarray(mask).astype(bool)
     if not mask.any():
         return None
-    rgb = np.asarray(frame_data.image)[..., :3].astype(np.uint8)
+    rgb = np.asarray(image)[..., :3].astype(np.uint8)
     return Image.fromarray(np.dstack([rgb, (mask * 255).astype(np.uint8)]), mode="RGBA")
 
 
 def _cond_images(sequence, obj_idx, frame_keys):
     """Per-frame masked RGBA (the pass's image conditioning), None where empty."""
-    return [_masked_rgba(sequence[fk], obj_idx) for fk in frame_keys]
+    return [_masked_rgba(image, masks[obj_idx])
+            for image, masks, _ in map(sequence.conditioning_source, frame_keys)]
 
 
 def _cache_key(sp_cfg, cfg, seed, frame_keys, cond_images,

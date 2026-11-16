@@ -230,6 +230,20 @@ def load_and_process_depth(
             depth_map_z = depth_map.astype(np.float32)
             valid_mask = depth_map_z > 0
             depth_map_z[~valid_mask] = 0.0
+        elif dataset_type == "mvsynth":
+            # MVSynth: float32 TIFF z-depth rendered with the images, background 0, K from the
+            # scene's gt/cameras.json. The tiff is at the render size, so a run that resized the
+            # image (max_side) gets the depth resized with it (nearest).
+            from pathlib import Path as _Path
+            from .mvsynth_data import mvsynth_k
+            K_ms = mvsynth_k(str(_Path(frames_path).parent), H, W)
+            fx, fy, cx, cy = K_ms[0, 0], K_ms[1, 1], K_ms[0, 2], K_ms[1, 2]
+            if depth_map.shape != (H, W):
+                import cv2
+                depth_map = cv2.resize(depth_map, (W, H), interpolation=cv2.INTER_NEAREST)
+            depth_map_z = depth_map.astype(np.float32)
+            valid_mask = depth_map_z > 0
+            depth_map_z[~valid_mask] = 0.0
         else:
             raise ValueError(f"No GT depth loader for dataset {dataset_type!r}.")
 

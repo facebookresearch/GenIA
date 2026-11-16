@@ -80,14 +80,15 @@ def emit_preprocessing_outputs(cfg, sequence):
             export_preprocessing_colmap(cfg, sequence, out_dir)
 
 
-def run_preprocessing(cfg, frame_indices, view_indices, asset_indices):
+def run_preprocessing(cfg, frame_indices, view_indices, asset_indices, *, emit=True):
     """PREPROCESSING: build + return the processed ``Sequence`` (depth + camera
     poses, per ``core/configs/processing``) for every downstream consumer, and emit
     the processing diagnostics.
 
     A special always-run stage (mirrors FINAL): NOT a manifest block,
     no per-block flags.  Writes the depth/normals/pointmap panels + summary grid
-    into the unprefixed ``preprocessing/`` folder.
+    into the unprefixed ``preprocessing/`` folder (``emit=False`` skips that, for a host
+    that writes the folder itself).
     """
     from genia.core.utils import Sequence
 
@@ -121,9 +122,14 @@ def run_preprocessing(cfg, frame_indices, view_indices, asset_indices):
         recon_resolution_set=getattr(cfg.processing, "recon_resolution_set", 518),
         recon_mask_edges=getattr(cfg.processing, "recon_mask_edges", True),
         recon_confidence_min=getattr(cfg.processing, "recon_confidence_min", None),
+        native_conditioning=getattr(cfg.processing, "native_conditioning", False),
+        native_supervision=getattr(cfg.processing, "native_supervision", False),
+        native_resolution_max_scale=getattr(cfg.processing, "native_resolution_max_scale", 2.0),
+        precomputed_geometry=getattr(cfg.processing, "precomputed_geometry", None),
     )
 
-    emit_preprocessing_outputs(cfg, sequence)
+    if emit:
+        emit_preprocessing_outputs(cfg, sequence)
 
     # Depth + cameras are in the Sequence, so the backend is done. Freed HERE, not left
     # to the GC: it is resident memory every later block would be charged for. See

@@ -64,6 +64,28 @@ class MaskDict(dict):
         return np.zeros(self.shape, dtype=bool)
 
 
+# PIL mode -> (channels, dtype) of its array, for the PNG modes OpenCV decodes to the same pixels.
+_CV2_PNG_MODES = {"RGB": (3, np.uint8), "RGBA": (4, np.uint8), "L": (0, np.uint8),
+                  "I;16": (0, np.uint16)}
+
+
+def _decode_png_cv2(path: str, mode: str):
+    """The PNG's pixels as ``np.array(Image.open(path))`` gives them, decoded by OpenCV (faster
+    on large PNGs), or None to leave it to PIL: palette images (their indices ARE
+    the object ids, OpenCV would expand them to colours), every other mode, and any file whose
+    OpenCV decode does not have the layout PIL's would (16-bit RGB, a tRNS chunk, ...)."""
+    if mode not in _CV2_PNG_MODES:
+        return None
+    import cv2
+    arr = cv2.imread(path, cv2.IMREAD_UNCHANGED)
+    channels, dtype = _CV2_PNG_MODES[mode]
+    if arr is None or arr.dtype != dtype or (arr.shape[2] if arr.ndim == 3 else 0) != channels:
+        return None
+    if channels:
+        arr = cv2.cvtColor(arr, cv2.COLOR_BGR2RGB if channels == 3 else cv2.COLOR_BGRA2RGBA)
+    return arr
+
+
 def load_image(path: str, to_uint8: bool = True, to_rgb: bool = False) -> np.ndarray:
     """
     Load an image from disk.
@@ -96,13 +118,12 @@ def load_image(path: str, to_uint8: bool = True, to_rgb: bool = False) -> np.nda
     >>> depth.dtype
     dtype('float32')
     """
-    image = Image.open(path)
-    if to_rgb and image.mode in ("P", "L"):
-        image = image.convert("RGB")
-    image = np.array(image)
-    if to_uint8:
-        image = image.astype(np.uint8)
-    return image
+    image = Image.open(path)  # lazy: reads only the header
+    expand = to_rgb and image.mode in ("P", "L")
+    arr = None if expand or image.format != "PNG" else _decode_png_cv2(path, image.mode)
+    if arr is None:
+        arr = np.array(image.convert("RGB") if expand else image)
+    return arr.astype(np.uint8) if to_uint8 else arr
 
 
 def load_masks(mask_path: str) -> MaskDict:
@@ -157,7 +178,11 @@ def load_masks(mask_path: str) -> MaskDict:
 
     # Build dict of object_id -> mask
     masks_dict = {}
-    for object_id in np.unique(mask):
+    # The ids present, ascending: a histogram of an unsigned (PNG) mask finds them faster
+    # than np.unique's sort of every pixel; same ids, same order.
+    ids = (np.flatnonzero(np.bincount(mask.ravel())) if mask.dtype.kind == "u"
+           else np.unique(mask))
+    for object_id in ids:
         if object_id == 0:
             continue  # skip background
         masks_dict[int(object_id)] = (mask == object_id)
@@ -186,7 +211,7 @@ def group_palette_masks(
     return MaskDict(grouped, shape=masks.shape)
 
 
-MV_STATIC_DATASETS = ("mvcustom", "gso", "co3d")
+MV_STATIC_DATASETS = ("mvcustom", "mvsynth", "gso", "co3d")
 """Datasets whose asset position is a VIEW at one timestamp, not a timestep.
 
 Two things follow from that one fact, which is why the set is named rather than
@@ -446,6 +471,31 @@ def setup_paths(
             "dataset_type": "mvcustom",
         }
 
+    elif dataset_type == "mvsynth":
+        # Synthetic scenes (reader mvsynth_data.py):
+        # the mvcustom layout -- asset position is the VIEW -- plus GT in {scene}/gt/. The GT
+        # depth lives outside frames_path, so depth_names are relative to it (os.path.join keeps
+        # ".."), all-or-nothing like GSO's.
+        data_path = os.path.join(dataset_path, scene_name)
+        frames_path = os.path.join(data_path, "rgbs")
+        image_names = sorted(
+            [f for f in os.listdir(frames_path)
+             if os.path.splitext(f)[1].lower() in _IMAGE_EXTS],
+            key=_natural_key,
+        )
+        depth_candidates = [f"../gt/depth/{os.path.splitext(f)[0]}.tiff" for f in image_names]
+        depth_names = (depth_candidates if all(
+            os.path.isfile(os.path.join(frames_path, d)) for d in depth_candidates) else [])
+        return {
+            "data_path": data_path,
+            "frames_path": frames_path,
+            "masks_path": os.path.join(data_path, "segmentations"),
+            "image_names": image_names,
+            "mask_names": [os.path.splitext(f)[0] + ".png" for f in image_names],
+            "depth_names": depth_names,
+            "dataset_type": "mvsynth",
+        }
+
     elif dataset_type == "gso":
         # GSO-30 benchmark: {path}/{scene}/render_mvs_25/model/{idx:03d}.{png,npy}
         # RGBA images (alpha = object mask). 25 views total; views 0-9 are
@@ -552,7 +602,7 @@ def setup_paths(
     else:
         raise ValueError(
             f"Unknown dataset type: {dataset_type}. Supported: 'davis_actionmesh', "
-            f"'dyncustom', 'oursactionbench', 'image', 'mvcustom', 'gso', 'co3d'"
+            f"'dyncustom', 'oursactionbench', 'image', 'mvcustom', 'mvsynth', 'gso', 'co3d'"
         )
 
 

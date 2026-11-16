@@ -473,9 +473,10 @@ class AppearanceInitConfig:
     rendering_guidance_microbatch_size: int = 8
     """Microbatch size for the per-frame render loop.  ``0`` = single-pass
     (build the graph for all N frames, one backward).  ``k > 0`` = process
-    frames in chunks of ``k`` with per-chunk backward + leaf-tensor gradient
-    accumulation; the resulting gradient is identical to the single-pass
-    one but caps activation memory at ``min(k, N)`` frames.  Default 8
+    frames in chunks of ``k`` with per-chunk backward into leaf copies of the
+    decoded Gaussians (the decoder runs once per step either way); the
+    resulting gradient is identical to the single-pass one but caps the
+    render + loss activation memory at ``min(k, N)`` frames.  Default 8
     keeps activation memory bounded on many-view scenes (especially with
     LPIPS); raise (or set to 0) when N is small."""
 

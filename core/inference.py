@@ -90,7 +90,7 @@ def _install_vis_bias_hooks(
     ragged bias; the int form leaves the rectangular path untouched.
     """
     from genia.core.visibility_attn import (
-        SparseVisibilityBiasHook, build_voxel_patch_mask,
+        SparseVisibilityBiasHook, build_voxel_patch_mask, flatten_pixel_coords,
         parse_layer_selection, transform_pixels_to_518,
         transform_pixels_to_518_full_image,
     )
@@ -102,32 +102,25 @@ def _install_vis_bias_hooks(
         raise ValueError(f"L has {len(_L_list)} entries but N={N}")
     _L_of = (lambda i: _L_list[i]) if _L_list is not None else (lambda i: L)
 
+    # The masks are built (and dilated) on the backbone's device, which the hook
+    # moves them to anyway; on CPU the dilation alone cost seconds per object.
+    _device = next(wrapper.parameters()).device
     voxel_patch_masks = []
     voxel_patch_masks_full = []
     for _vi in range(N):
-        _raw_pc = visibility_pixel_coords[_vi]
-        _n_with_pixels = sum(1 for v in _raw_pc.values() if len(v) > 0)
-        pixel_coords_518 = transform_pixels_to_518(
-            _raw_pc, frames[_vi]["mask"],
-        )
-        _n_in_bounds = 0
-        _n_out_bounds = 0
-        for _vid, _px in pixel_coords_518.items():
-            if len(_px) == 0:
-                continue
-            _r, _c = _px[:, 0], _px[:, 1]
-            _valid = (_r >= 0) & (_r < 518) & (_c >= 0) & (_c < 518)
-            _n_in_bounds += int(_valid.sum())
-            _n_out_bounds += int((~_valid).sum())
+        _vids, _px = flatten_pixel_coords(visibility_pixel_coords[_vi])
+        _n_with_pixels = len(np.unique(_vids))
+        _px_518 = transform_pixels_to_518(_px, frames[_vi]["mask"])
+        _in = ((_px_518[:, 0] >= 0) & (_px_518[:, 0] < 518)
+               & (_px_518[:, 1] >= 0) & (_px_518[:, 1] < 518))
+        _n_in_bounds, _n_out_bounds = int(_in.sum()), int((~_in).sum())
 
-        vpm = build_voxel_patch_mask(pixel_coords_518, _L_of(_vi))
+        vpm = build_voxel_patch_mask(_vids, _px_518, _L_of(_vi), device=_device)
         voxel_patch_masks.append(vpm)
 
         _H_orig, _W_orig = frames[_vi]["mask"].shape[:2]
-        pixel_coords_518_full = transform_pixels_to_518_full_image(
-            _raw_pc, _H_orig, _W_orig,
-        )
-        vpm_full = build_voxel_patch_mask(pixel_coords_518_full, _L_of(_vi))
+        _px_518_full = transform_pixels_to_518_full_image(_px, _H_orig, _W_orig)
+        vpm_full = build_voxel_patch_mask(_vids, _px_518_full, _L_of(_vi), device=_device)
         voxel_patch_masks_full.append(vpm_full)
 
         if verbose:
@@ -313,6 +306,14 @@ def _consensus_fuse_step(
     return x + v_canon.unsqueeze(0) * dt, unreached
 
 
+def _conditioning(f: dict):
+    """``(image, mask)`` a frame dict conditions SAM3D on: its ``cond_image`` /
+    ``cond_mask`` (``Sequence.conditioning_source``) when set, else ``image`` / ``mask``,
+    which stay the frame's own for everything measured in its pixels (rendering guidance,
+    the visibility hooks)."""
+    return f.get("cond_image", f["image"]), f.get("cond_mask", f["mask"])
+
+
 class Inference:
     # public facing inference API
     # only put publicly exposed arguments here
@@ -401,7 +402,7 @@ class Inference:
         # 1. Preprocess each frame individually (preprocess_image asserts ndim==3)
         ss_inputs = []
         for f in frames:
-            rgba = self.merge_mask_to_rgba(f["image"], f["mask"])
+            rgba = self.merge_mask_to_rgba(*_conditioning(f))
             pm = f["pointmap"]
             # compute_pointmap just passes through when pointmap is provided
             pm_dict = pipeline.compute_pointmap(rgba, pointmap=pm)
@@ -870,7 +871,7 @@ class Inference:
         # 1. Preprocess all frames
         preprocessed = []
         for f in frames:
-            rgba = self.merge_mask_to_rgba(f["image"], f["mask"])
+            rgba = self.merge_mask_to_rgba(*_conditioning(f))
             slat_input = pipeline.preprocess_image(
                 rgba, pipeline.slat_preprocessor
             )
@@ -1030,20 +1031,22 @@ class Inference:
                         wrapper, x_sparse, t_tensor, cond_embedded, d_tensor,
                     )
 
-                    # Unconditional forward: zero conditions (no visibility bias)
+                    # Unconditional forward: zero conditions (no visibility bias).
+                    # Same latent, coords and zero cond for every view, so one
+                    # batch element serves all N.
                     for _h in _vis_bias_hooks:
                         _h.set_active(False)
                     y_uncond = SLatFlowModel.forward(
-                        wrapper, x_sparse, t_tensor,
-                        torch.zeros_like(cond_embedded), d_tensor,
+                        wrapper,
+                        sp.SparseTensor(feats=x_t[0], coords=batched_coords[:L]),
+                        t_tensor, torch.zeros_like(cond_embedded[:1]), d_tensor,
                     )
 
                     # CFG combination: (1 + s) * cond - s * uncond
                     v = (
-                        (1 + cfg_strength) * y_cond.feats
-                        - cfg_strength * y_uncond.feats
-                    )
-                    v = v.reshape(N, L, -1)  # (N, L, D)
+                        (1 + cfg_strength) * y_cond.feats.reshape(N, L, -1)
+                        - cfg_strength * y_uncond.feats.unsqueeze(0)
+                    )  # (N, L, D)
 
                     # Visibility fusion weights (computed once, frozen): binary
                     # 0/1 visibility -> softmax over views -> clamp + renorm.
@@ -1282,7 +1285,7 @@ class Inference:
         # 1. Preprocess every frame, stack, embed conditions (as stage2_mv).
         preprocessed = []
         for f in frames:
-            rgba = self.merge_mask_to_rgba(f["image"], f["mask"])
+            rgba = self.merge_mask_to_rgba(*_conditioning(f))
             preprocessed.append(
                 pipeline.preprocess_image(rgba, pipeline.slat_preprocessor)
             )
@@ -1425,11 +1428,8 @@ class Inference:
                             for _h in _hooks:
                                 _h.set_active(False)
                             hooks_by_group[g] = _hooks
-                        # Each group's bias is (K, 1, L_down_max, 5496) fp32,
-                        # shared across that group's layers.  If it ever OOMs,
-                        # the hook already does .to(device) on every call, so
-                        # moving each _bias to CPU after the first step costs
-                        # one H2D copy per forward and nothing else.
+                        # Each group's bias is a FootprintBias (footprint keys
+                        # per row, no dense tensor), shared across its layers.
                         _n_hooked = sum(1 for h in hooks_by_group if h)
                         print(f"    Consensus attn bias: {_n_hooked}/"
                               f"{len(groups)} group(s) hooked, alpha="

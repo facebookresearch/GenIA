@@ -1798,7 +1798,9 @@ def _prepare_frame_data_for_refinement(
     """
     frame = sequence[frame_idx]
 
-    image, render_masks, K_matrix = frame.image, frame.masks, frame.K_matrix
+    # image/mask/K: native pixels under processing.native_supervision; depth and
+    # valid_mask stay at the backend's grid (_compute_frame_loss matches them).
+    image, render_masks, K_matrix = sequence.render_source(frame_idx)
     mask = render_masks[obj_idx]
     if not mask.any():
         return None  # Object not present in this frame
@@ -2564,7 +2566,7 @@ def refine_poses_global_composite(
 
     for frame_idx in sorted(frame_to_obj_inputs.keys()):
         frame = sequence[frame_idx]
-        render_image, render_masks, render_K = frame.image, frame.masks, frame.K_matrix
+        render_image, render_masks, render_K = sequence.render_source(frame_idx)
         gt_image = torch.from_numpy(render_image).float().cuda() / 255.0
 
         # Compute union mask and per-object masks
@@ -3572,7 +3574,10 @@ def _build_fused_mv_background(
     composite path) it has no background — full-image depth (depth_mask_only=
     False) needs one.  Building it from the union of all views fills the holes a
     single view can't see; all params are DETACHED (fixed depth reference, no
-    pose gradient).  Capped at ``_SHARED_WORLD_BG_MAX_POINTS``.
+    pose gradient).  Capped at ``_SHARED_WORLD_BG_MAX_POINTS`` by a pixel STRIDE ``k``, each kept
+    splat sized (``K / k``) to the ``k x k`` pixels it stands for: a random subset would keep
+    single-pixel splats, a near-transparent speckle at high resolution (4 views at 3840x2880
+    kept 0.34% of the points).
 
     Returns ``{frame_idx: (xyz, rot, scale, opac, feat)}`` in each view's camera
     space, or ``{}`` when no view has background geometry (→ masked-depth
@@ -3580,12 +3585,17 @@ def _build_fused_mv_background(
     """
     from .gaussian import create_background_gaussians
     from .rendering import transform_gaussian_params_world_to_cam
+    n_bg = sum(int((~np.asarray(sequence[fi].masks[obj_idx], dtype=bool)
+                    & np.isfinite(sequence[fi].pointmap).all(axis=-1)).sum()) for fi in frame_data)
+    k = max(1, int(np.ceil(np.sqrt(n_bg / _SHARED_WORLD_BG_MAX_POINTS))))
     w_xyz, w_rot, w_scale, w_opac, w_feat = [], [], [], [], []
     for fi in frame_data:
         frame = sequence[fi]
+        K_k = np.asarray(frame.K_matrix, dtype=np.float64).copy()
+        K_k[:2] /= k
         bg_gs = create_background_gaussians(
-            frame.image, frame.pointmap, [frame.masks[obj_idx]],
-            frame.K_matrix, c2w=frame.c2w,
+            frame.image[::k, ::k], frame.pointmap[::k, ::k],
+            [np.asarray(frame.masks[obj_idx], dtype=bool)[::k, ::k]], K_k, c2w=frame.c2w,
         )
         if bg_gs is None:
             continue
@@ -3600,10 +3610,6 @@ def _build_fused_mv_background(
         return {}
     f_xyz, f_rot = torch.cat(w_xyz), torch.cat(w_rot)
     f_scale, f_opac, f_feat = torch.cat(w_scale), torch.cat(w_opac), torch.cat(w_feat)
-    if f_xyz.shape[0] > _SHARED_WORLD_BG_MAX_POINTS:
-        sel = torch.randperm(f_xyz.shape[0], device=device)[:_SHARED_WORLD_BG_MAX_POINTS]
-        f_xyz, f_rot, f_scale, f_opac, f_feat = (
-            f_xyz[sel], f_rot[sel], f_scale[sel], f_opac[sel], f_feat[sel])
     # Re-project the shared-world union into each view's camera once (fixed → no
     # per-iteration transform); the shared-world loop renders in camera space.
     bg_cam_per_frame: Dict[int, Tuple[torch.Tensor, ...]] = {}
@@ -3611,7 +3617,7 @@ def _build_fused_mv_background(
         c_xyz, c_rot = transform_gaussian_params_world_to_cam(
             f_xyz, f_rot, sequence[fi].c2w)
         bg_cam_per_frame[fi] = (c_xyz.detach(), c_rot.detach(), f_scale, f_opac, f_feat)
-    print(f"      obj {obj_idx}: fused MV background {f_xyz.shape[0]} pts "
+    print(f"      obj {obj_idx}: fused MV background {f_xyz.shape[0]} pts (pixel stride {k}) "
           f"→ full-image depth on {len(bg_cam_per_frame)} view(s)")
     return bg_cam_per_frame
 
@@ -4461,7 +4467,7 @@ def refine_poses_for_sequence(
                 canonical_gs = obj_gaussians
 
             frame = sequence[frame_idx]
-            render_image, render_masks, K_matrix = frame.image, frame.masks, frame.K_matrix
+            render_image, render_masks, K_matrix = sequence.render_source(frame_idx)
             mask = render_masks[obj_idx]
             if not mask.any():
                 refined_tokens[obj_idx].append((frame_idx, decoder_input))

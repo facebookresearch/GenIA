@@ -15,4 +15,4 @@ mv_reference_only_ode: false
 # the input shape latent (NOT the checkpoint weights).  A relative path resolves
 # against the genia checkout (paths.GENIA_ROOT), not the working directory; null
 # disables.  See core/sam3d_shape_cache.py.
-shape_cache_dir: cached_shapes
+shape_cache_dir: null   # off by default; cached_shapes to enable

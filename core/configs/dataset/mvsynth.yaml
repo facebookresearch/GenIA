@@ -1,0 +1,11 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+
+name: mvsynth
+path: data/mvsynth
+scene_name: null   # set dataset.scene_name: the scenes are not distributed
+frame_index: null
+frame_stride: 1
+object_indices: null
+fps: 1
+downscale_factor: 3   # 3840x2880 masters -> 1280x960 (2026-11-02; was 1, full res)
+num_input_views: null

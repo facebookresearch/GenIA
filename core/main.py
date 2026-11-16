@@ -1666,35 +1666,89 @@ def _stage2_frame_data(sequence, frame_idx, obj_idx):
     """Per-frame conditioning payload for ``stage2_mv``.
 
     ``K_matrix`` / ``c2w`` / ``depth_map_z`` are read only by in-ODE rendering
-    guidance; cheap to always include.
+    guidance; cheap to always include.  ``image`` / ``mask`` / ``K_matrix`` stay the
+    frame's (the visibility hooks project into its pixels, against its depth); rendering
+    guidance renders against ``render_*`` (native pixels under
+    ``processing.native_supervision``).
     """
     frame_data = sequence[frame_idx]
+    cond_image, cond_masks, _ = sequence.conditioning_source(frame_idx)
+    render_image, render_masks, render_K = sequence.render_source(frame_idx)
     return {
+        "render_image": render_image,      # rendering guidance's targets
+        "render_mask": render_masks[obj_idx],
+        "render_K": render_K,
         "image": frame_data.image,
         "mask": frame_data.masks[obj_idx],
+        "cond_image": cond_image,          # what SAM3D is conditioned on
+        "cond_mask": cond_masks[obj_idx],
         "K_matrix": frame_data.K_matrix,
         "c2w": getattr(frame_data, "c2w", None),
         "depth_map_z": getattr(frame_data, "depth_map_z", None),
     }
 
 
-def _perframe_attn_bias_pixel_coords(obj_idx, coords_int, decoder_input,
-                                     sequence, frame_idx, ai_cfg):
-    """Voxel→patch projection for ONE frame's grid + pose (attn-bias input).
+def _perframe_voxel_coords(state, obj_idx, decoder_input, device):
+    """The ``(L, 4)`` voxel coords an object's per-frame Stage 2 runs on
+    (``strategy=perframe``), or None when it has none. Priority:
 
-    ``compute_visibility_multi_object`` with a single object and a single view;
-    returns the per-view pixel coords ``stage2_mv`` feeds to the
-    ``SparseVisibilityBiasHook``.
+      1. ``perframe_shape_coords`` — set by the parallel pass
+         (and its shape-cache hit path), OR by
+         GT_SHAPES_INVERSION (per-frame modes).  Gives each
+         frame its own voxel grid decoded from its per-frame
+         shape token.  Required for true per-frame appearance
+         under non-rigid (mono-dynamic, MV-dynamic) scenes.
+      2. ``decoder_input_slat`` — set by an earlier appearance
+         pass.  Falls through to its coords when present.
+      3. canonical coords fallback — single grid for all frames.
+    """
+    import torch
+
+    if decoder_input.get("perframe_shape_coords") is not None:
+        return decoder_input["perframe_shape_coords"]
+    if decoder_input.get("decoder_input_slat") is not None:
+        return decoder_input["decoder_input_slat"].coords
+    if state.canonical_slats.get(obj_idx) is not None:
+        return state.canonical_slats[obj_idx].coords
+    if obj_idx in state.canonical_shape_coords:
+        xyz = state.canonical_shape_coords[obj_idx].astype(np.int32)
+        return torch.tensor(np.hstack([np.zeros((len(xyz), 1), np.int32), xyz]),
+                            dtype=torch.int32, device=device)
+    return None
+
+
+def _perframe_frame_objects(state, frame_idx, device):
+    """Every object present in ``frame_idx`` -> ``(coords_int (L, 3), decoder_input)``, on the
+    voxel grid its per-frame Stage 2 runs on (:func:`_perframe_voxel_coords`)."""
+    objects = {}
+    for oi, tokens in state.tokens_by_object.items():
+        for fk, di in tokens:
+            if fk == frame_idx:
+                coords = _perframe_voxel_coords(state, oi, di, device)
+                if coords is not None:
+                    c = coords.detach().cpu().numpy().astype(np.int32)
+                    objects[oi] = (c[:, 1:] if c.shape[1] == 4 else c, di)
+                break
+    return objects
+
+
+def _perframe_attn_bias_pixel_coords(obj_idx, objects, sequence, frame_idx, ai_cfg):
+    """Voxel→patch projection of ``obj_idx`` in ONE frame (attn-bias input).
+
+    ``objects`` maps every object in the frame to its ``(coords_int, decoder_input)``, so
+    the others occlude ``obj_idx`` exactly as in the canonical path's
+    ``compute_visibility_multi_object`` call; returns ``obj_idx``'s per-view pixel coords,
+    what ``stage2_mv`` feeds to the ``SparseVisibilityBiasHook``.
     """
     from genia.core.visibility import compute_visibility_multi_object
 
     _, pixel_coords = compute_visibility_multi_object(
-        {obj_idx: {
-            "voxel_coords": coords_int,
-            "rotations": [decoder_input["rotation"].detach().cpu().numpy().flatten()],
-            "translations": [decoder_input["translation"].detach().cpu().numpy().flatten()],
-            "scales": [decoder_input["scale"].detach().cpu().numpy().flatten()],
-        }},
+        {oi: {
+            "voxel_coords": coords,
+            "rotations": [di["rotation"].detach().cpu().numpy().flatten()],
+            "translations": [di["translation"].detach().cpu().numpy().flatten()],
+            "scales": [di["scale"].detach().cpu().numpy().flatten()],
+        } for oi, (coords, di) in objects.items()},
         K_matrices=[sequence[frame_idx].K_matrix],
         image_height=sequence.H, image_width=sequence.W,
         neighbor_tolerance=ai_cfg.visibility_neighbor_tolerance,
@@ -1909,17 +1963,6 @@ def run_appearance_init(cfg, state, sequence, inference, pipeline_obj, evaluator
             # are used when available; otherwise fall back to canonical coords
             # (when per-frame SLATs were never populated). Poses and shape
             # tokens are unchanged.
-            canon_slat = state.canonical_slats.get(obj_idx)
-            canon_coords_fallback = None
-            if canon_slat is not None:
-                canon_coords_fallback = canon_slat.coords
-            elif obj_idx in state.canonical_shape_coords:
-                xyz_np = state.canonical_shape_coords[obj_idx]
-                batch_col = np.zeros((xyz_np.shape[0], 1), dtype=np.int32)
-                coords_np = np.hstack([batch_col, xyz_np.astype(np.int32)])
-                canon_coords_fallback = torch.tensor(
-                    coords_np, dtype=torch.int32, device=device,
-                )
 
             # attn_bias + rendering_guidance act on each per-frame Stage-2
             # prediction.  When either is active, route the denoise through
@@ -1942,32 +1985,14 @@ def run_appearance_init(cfg, state, sequence, inference, pipeline_obj, evaluator
             for frame_idx, decoder_input in tqdm(
                 tokens_list, desc=f"  Obj {obj_idx} perframe appearance"
             ):
-                # Coord-source priority:
-                #   1. ``perframe_shape_coords`` — set by the parallel pass
-                #      (and its shape-cache hit path), OR by
-                #      GT_SHAPES_INVERSION (per-frame modes).  Gives each
-                #      frame its own voxel grid decoded from its per-frame
-                #      shape token.  Required for true per-frame appearance
-                #      under non-rigid (mono-dynamic, MV-dynamic) scenes.
-                #   2. ``decoder_input_slat`` — set by an earlier appearance
-                #      pass.  Falls through to its coords when present.
-                #   3. canonical coords fallback — single grid for all frames.
-                pf_coords = decoder_input.get("perframe_shape_coords")
-                existing_slat = decoder_input.get("decoder_input_slat")
-                if pf_coords is not None:
-                    coords = pf_coords
-                elif existing_slat is not None:
-                    coords = existing_slat.coords
-                elif canon_coords_fallback is not None:
-                    coords = canon_coords_fallback
-                else:
+                coords = _perframe_voxel_coords(state, obj_idx, decoder_input, device)
+                if coords is None:
                     raise RuntimeError(
                         f"appearance_init=perframe requires voxel coords "
                         f"for obj {obj_idx} frame {frame_idx}, but neither "
                         f"a per-frame SLAT nor a canonical shape is "
                         f"available."
                     )
-                frame_data = sequence[frame_idx]
                 if _use_stage2:
                     # attn_bias needs the voxel→patch projection on THIS
                     # frame's grid + pose; rendering_guidance needs only this
@@ -1975,11 +2000,8 @@ def run_appearance_init(cfg, state, sequence, inference, pipeline_obj, evaluator
                     # internally (no manual merge_mask_to_rgba).
                     _pf_pc = None
                     if _attn_bias_on:
-                        _coords_int = coords.detach().cpu().numpy().astype(np.int32)
-                        if _coords_int.shape[1] == 4:
-                            _coords_int = _coords_int[:, 1:]
                         _pf_pc = _perframe_attn_bias_pixel_coords(
-                            obj_idx, _coords_int, decoder_input,
+                            obj_idx, _perframe_frame_objects(state, frame_idx, device),
                             sequence, frame_idx, ai_cfg,
                         )
 
@@ -1998,8 +2020,9 @@ def run_appearance_init(cfg, state, sequence, inference, pipeline_obj, evaluator
                         **_s2_kwargs,
                     )
                 else:
+                    cond_image, cond_masks, _ = sequence.conditioning_source(frame_idx)
                     rgba = inference.merge_mask_to_rgba(
-                        frame_data.image, frame_data.masks[obj_idx],
+                        cond_image, cond_masks[obj_idx],
                     )
                     slat_input_dict = pipeline_obj.preprocess_image(
                         rgba, pipeline_obj.slat_preprocessor,
@@ -2202,8 +2225,8 @@ def run_appearance_init(cfg, state, sequence, inference, pipeline_obj, evaluator
                     coords_int = _entry["coords"].cpu().numpy().astype(np.int32)
                     _pf_pc = None
                     if _attn_bias_on:
-                        _pf_pc = _perframe_attn_bias_pixel_coords(
-                            obj_idx, coords_int, _di, sequence, _fk, ai_cfg,
+                        _pf_pc = _perframe_attn_bias_pixel_coords(   # single object
+                            obj_idx, {obj_idx: (coords_int, _di)}, sequence, _fk, ai_cfg,
                         )
 
                     def _pf_pose_decoder(_d=_di):
@@ -2719,3 +2742,8 @@ def _run_canonical_finetuning(cfg, state, sequence, pipeline_obj, device,
         canonical_gaussians=ft_gaussians,
         lora_state_dicts=ft_lora,
     )
+    # FINETUNE writes decoded poses only; re-derive the raw tokens (live + snapshot) from
+    # them, or global_pose_refine_2's raw-token solve restarts from the pre-FINETUNE pose.
+    if cfg.finetuning.refine_poses and cfg.pipeline.mv_shared_world_pose:
+        for obj_idx in state.tokens_by_object:
+            state.rebase_perframe_from_reference(obj_idx, sequence, scope="timestamp")

@@ -31,6 +31,12 @@ per-frame deformation.
 
 
 
+## 📰 Updates
+
+**Nov 2026:** ~2× faster appearance stage and ~55% less backbone GPU memory, same results ([CHANGELOG](CHANGELOG.md)).
+
+
+
 ## 🛠️ Installation
 
 Requires conda, a CUDA 12.8 toolkit and an NVIDIA GPU.

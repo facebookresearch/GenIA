@@ -16,6 +16,9 @@ recon_resolution_set: 518    # Long side the backend is fed at (518 or 504); sho
 recon_on_test_views: true    # Also feed held-out test views to the model so their predicted cameras are available
 recon_mask_edges: true       # map-anything's normals+depth edge mask on predicted depth
 recon_confidence_min: null   # Drop map-anything pixels with conf <= this (1.01 = its 'guessing' floor); null = unused
+native_conditioning: false   # true: condition the shape models on native pixels (depth stays at the backend's crop)
+native_supervision: false    # true: render the photometric targets (RG, pose refines, FINETUNE) at native res; depth terms stay at the crop
+native_resolution_max_scale: 2.0  # ...both capped at this many * recon_resolution_set on the long side
 # Both need map_anything as well as a dataset that HAS the signal; either missing
 # raises at Sequence init rather than degrading.
 condition_recon_model_on_gt_poses: false   # requires GT poses

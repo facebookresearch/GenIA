@@ -23,7 +23,7 @@ from .io_utils import MaskDict, group_palette_masks, load_image, load_masks, set
 from .recon_cache import GT_K_DATASETS
 
 
-MA_ALL_TRAIN_VIEWS_DATASETS = ("gso", "mvcustom", "co3d")
+MA_ALL_TRAIN_VIEWS_DATASETS = ("gso", "mvcustom", "mvsynth", "co3d")
 """MV-static datasets where map-anything additionally sees the views the pipeline
 does NOT consume, for a robust pairwise scale anchor."""
 
@@ -166,7 +166,7 @@ def crop_resize_intrinsics(K: np.ndarray, orig_shape: tuple,
 #: Backends that predict camera poses as well as depth, and so share every gate that
 #: exists because a pose prediction has to be captured, anchored or pruned. MoGe and the
 #: GT path leave c2w at identity.
-POSE_PREDICTING_MODELS = ("map_anything",)
+POSE_PREDICTING_MODELS = ("map_anything", "precomputed")
 
 #: Backends that CONSUME a GT signal (poses / depth / intrinsics) as a prior, i.e. for
 #: which `condition_recon_model_on_gt_{poses,depths}` mean anything.
@@ -269,6 +269,10 @@ class Sequence:
         recon_resolution_set: int = 518,
         recon_mask_edges: bool = True,
         recon_confidence_min: Optional[float] = None,
+        native_conditioning: bool = False,
+        native_supervision: bool = False,
+        native_resolution_max_scale: float = 2.0,
+        precomputed_geometry: Optional[str] = None,
     ):
         # Phase-A validation: type/consistency of the sourcing config. All
         # raise (always-strict). GT-availability (Phase B) is checked at load
@@ -290,11 +294,16 @@ class Sequence:
                 "recon_resolution_set=512 is not selectable: 512 is not a multiple of "
                 "the 14-px patch size. Use 518 (default) or 504."
             )
-        if reconstruction_model not in ("moge", "map_anything", None):
+        if reconstruction_model not in ("moge", "map_anything", "precomputed", None):
             raise ValueError(
-                f"reconstruction_model must be 'moge', 'map_anything', or None; "
-                f"got {reconstruction_model!r}"
+                f"reconstruction_model must be 'moge', 'map_anything', 'precomputed', or "
+                f"None; got {reconstruction_model!r}"
             )
+        if (reconstruction_model == "precomputed") != bool(precomputed_geometry):
+            raise ValueError(
+                "reconstruction_model='precomputed' and precomputed_geometry go together "
+                f"(got {reconstruction_model!r}, {precomputed_geometry!r})")
+        self.precomputed_geometry = precomputed_geometry
         if depth_source == "pred" and reconstruction_model is None:
             raise ValueError(
                 "depth_source='pred' requires a reconstruction_model (got None) -- "
@@ -346,6 +355,12 @@ class Sequence:
         self.recon_resolution_set = recon_resolution_set
         self.recon_mask_edges = recon_mask_edges
         self.recon_confidence_min = recon_confidence_min
+        self.native_conditioning = native_conditioning
+        self.native_supervision = native_supervision
+        self.native_resolution_max_scale = float(native_resolution_max_scale)
+        # The native crop's lazy per-frame cache (conditioning_source / render_source);
+        # untouched while both flags are off.
+        self._native_cache: Dict[FrameKey, Tuple[np.ndarray, MaskDict, np.ndarray]] = {}
         # Two-axis indexing: frame_indices and view_indices are parallel lists
         # of the same length; their pair (frame, view) becomes a FrameKey.
         # asset_indices is the file-position into self.paths[*_names] arrays;
@@ -472,7 +487,7 @@ class Sequence:
             # own loader below — it uses the same flat files via
             # _load_image_and_masks / _load_dataset_camera_poses.
             self._load_from_co3d_flat()
-        elif reconstruction_model == "map_anything":
+        elif reconstruction_model in POSE_PREDICTING_MODELS:
             self._load_with_map_anything()
         else:
             for fk, asset_idx in zip(self._frame_keys, self._asset_indices):
@@ -606,6 +621,7 @@ class Sequence:
         map-anything's own preprocessing has run.
         """
         orig_shape = image.shape[:2]
+        self._model_input_hw = tuple(int(x) for x in target_hw)   # see the native crop
         if orig_shape == tuple(target_hw):
             return image, masks
         return (_crop_resize_image(image, target_hw),
@@ -659,7 +675,7 @@ class Sequence:
         Returns ``(depth_map_z, K_matrix)`` or ``None`` if unavailable.
         """
         paths = self.paths
-        if self.dataset_type not in ("gso", "oursactionbench") or not paths.get("depth_names"):
+        if self.dataset_type not in ("gso", "oursactionbench", "mvsynth") or not paths.get("depth_names"):
             return None
 
         depth_frames_path = paths["frames_path"]
@@ -731,6 +747,10 @@ class Sequence:
                 data_root=self.dataset_path,
             )
             return {idx: K_gt for idx in self._ma_frame_indices}
+        if self.dataset_type == "mvsynth":
+            from .mvsynth_data import mvsynth_k
+            K_gt = mvsynth_k(self.paths["data_path"], orig_h, orig_w)
+            return {idx: K_gt for idx in self._ma_frame_indices}
         raise AssertionError(f"{self.dataset_type} is in GT_K_DATASETS with no builder")
 
     def _conditioning_tables(self, orig_h: int, orig_w: int):
@@ -763,8 +783,31 @@ class Sequence:
             return None
         return os.path.join(self.paths["data_path"], subdir)
 
+    def _load_precomputed(self) -> dict:
+        """Depth + cameras another tool reconstructed (``processing=precomputed``): the
+        ``{asset index: ReconResult}`` file ``recon_cache`` writes, read in place of a
+        map-anything forward. Missing or incomplete is an error, never a fallback."""
+        from pathlib import Path
+
+        from .recon_cache import _load_results
+
+        results = _load_results(Path(self.precomputed_geometry), "precomputed geometry")
+        if results is None:
+            raise FileNotFoundError(
+                f"processing=precomputed: no readable geometry at {self.precomputed_geometry}")
+        missing = [i for i in self._ma_frame_indices if i not in results]
+        if missing:
+            raise ValueError(
+                f"processing=precomputed: {self.precomputed_geometry} lacks assets {missing}")
+        if any(results[i].cropped_image is None for i in self._ma_frame_indices):
+            raise ValueError(
+                f"processing=precomputed: {self.precomputed_geometry} has no cropped_image, "
+                "the RGB its depth is aligned to")
+        return results
+
     def _load_with_map_anything(self) -> None:
-        """Load all frames using map-anything for depth + camera poses.
+        """Load all frames using map-anything (or ``precomputed`` geometry) for depth +
+        camera poses.
 
         Phase 1: Load images and masks for all frames.
         Phase 2: Run map-anything on all images jointly.
@@ -807,17 +850,20 @@ class Sequence:
 
         _tf32 = torch.backends.cuda.matmul.allow_tf32
         try:
-            results = run_map_anything_cached(
-                images,
-                self._ma_frame_indices,
-                dataset_depths=dataset_depths,
-                dataset_intrinsics=dataset_intrinsics,
-                dataset_camera_poses=dataset_camera_poses,
-                cache_dir=self._recon_cache_dir("ma_cache"),
-                resolution_set=self.recon_resolution_set,
-                mask_edges=self.recon_mask_edges,
-                confidence_min=self.recon_confidence_min,
-            )
+            if self.reconstruction_model == "precomputed":
+                results = self._load_precomputed()
+            else:
+                results = run_map_anything_cached(
+                    images,
+                    self._ma_frame_indices,
+                    dataset_depths=dataset_depths,
+                    dataset_intrinsics=dataset_intrinsics,
+                    dataset_camera_poses=dataset_camera_poses,
+                    cache_dir=self._recon_cache_dir("ma_cache"),
+                    resolution_set=self.recon_resolution_set,
+                    mask_edges=self.recon_mask_edges,
+                    confidence_min=self.recon_confidence_min,
+                )
         finally:
             torch.backends.cuda.matmul.allow_tf32 = _tf32
 
@@ -839,6 +885,7 @@ class Sequence:
                 # Crop masks to match (same spatial transform)
                 model_h, model_w = depth_map_z.shape
                 masks = _crop_masks_to_match(masks, images[i].shape[:2], (model_h, model_w))
+                self._model_input_hw = (int(model_h), int(model_w))   # see the native crop
 
             # When MA's output c2w is overridden with GT c2w (camera_poses_source
             # == "gt") and we passed GT intrinsics as conditioning input, also
@@ -972,7 +1019,7 @@ class Sequence:
 
         depth_names_for_frame = []
         depth_frames_path = self.paths["frames_path"]
-        if self.dataset_type in ("gso", "oursactionbench") and self.paths["depth_names"]:
+        if self.dataset_type in ("gso", "oursactionbench", "mvsynth") and self.paths["depth_names"]:
             depth_names_for_frame = [self.paths["depth_names"][frame_idx]]
 
         pointmap, K_matrix, valid_mask, depth_map_z, normals_map = load_and_process_depth(
@@ -1112,6 +1159,13 @@ class Sequence:
             return self._load_poses_json(
                 os.path.join(self.paths["data_path"], "poses.json")
             )
+
+        # --- MVSynth: the rendering cameras, from {scene}/gt/cameras.json (already R3 c2w) ---
+        if self.dataset_type == "mvsynth":
+            from .mvsynth_data import mvsynth_c2w
+
+            c2ws = mvsynth_c2w(self.paths["data_path"])
+            return {idx: c2ws[idx] for idx in self._ma_frame_indices}
 
         # --- CO3D LaRa: per-view c2w (4x4 float32) stored as ``{NNN}.npy``
         # in the flat scene dir. The camera
@@ -1404,6 +1458,85 @@ class Sequence:
     def __getitem__(self, key) -> FrameData:
         """Get cached frame data by FrameKey or int (coerced to FrameKey(int, 0))."""
         return self._frames[as_frame_key(key)]
+
+    def conditioning_source(self, key) -> Tuple[np.ndarray, MaskDict, np.ndarray]:
+        """``(image, masks, K_matrix)`` the shape models are CONDITIONED on: the frame's
+        native (capped, ``downscale_factor``-strided) crop when ``native_conditioning``
+        is on, else the frame itself.
+
+        Only for a model's conditioning input.  Depth, pointmap, the frame's K and every
+        render/loss target stay at the backend's (H', W') -- read ``self[key]`` for those
+        and never mix the two.  SAM3D resizes its pointmap onto this image's grid itself
+        (nearest, in ``compute_pointmap``).  ``K`` belongs to THIS image.
+        """
+        return self._native_or_frame(key, getattr(self, "native_conditioning", False))
+
+    def render_source(self, key) -> Tuple[np.ndarray, MaskDict, np.ndarray]:
+        """``(image, masks, K_matrix)`` for RENDER / GT-comparison targets: the same native
+        crop as :meth:`conditioning_source` when ``native_supervision`` is on, else the
+        frame itself.  ``depth_map_z`` / ``pointmap`` / ``valid_mask`` stay at the
+        backend's (H', W'), which this never undershoots: a depth term compares the render
+        resampled onto that grid (``refinement._match_depth_grid``), and anything that
+        must be pixel-aligned with depth reads ``self[key]``."""
+        return self._native_or_frame(key, getattr(self, "native_supervision", False))
+
+    def _native_or_frame(self, key, native: bool):
+        fk = as_frame_key(key)
+        if not native:
+            f = self._frames[fk]
+            return f.image, f.masks, f.K_matrix
+        if fk not in self._native_cache:
+            self._native_cache[fk] = self._compute_native_frame_source(fk)
+        return self._native_cache[fk]
+
+    def _compute_native_frame_source(
+        self, fk: FrameKey,
+    ) -> Tuple[np.ndarray, MaskDict, np.ndarray]:
+        """The frame's native pixels over the SAME field of view as its (H', W') crop:
+        the same box, not resized down, at the run's ``downscale_factor`` stride, its long
+        side capped at ``native_resolution_max_scale * recon_resolution_set``; ``K``
+        converted with it.  The frame itself where nothing was cropped down.
+        """
+        import cv2
+
+        frame = self._frames[fk]
+        raw_image, raw_masks = self._load_image_and_masks(self._fk_to_asset[fk])
+        d = self.downscale_factor
+        # The crop's target BEFORE the stride, as the loader recorded it (frame size x d
+        # overshoots when d does not divide it: 518 at d=3 -> 519).
+        target_h, target_w = getattr(self, "_model_input_hw", None) or (
+            frame.image.shape[0] * d, frame.image.shape[1] * d)
+        scale, left, top, _, _ = crop_resize_transform(raw_image.shape[:2], (target_h, target_w))
+        if scale >= 1.0:
+            return frame.image, frame.masks, frame.K_matrix
+
+        raw_h, raw_w = raw_image.shape[:2]
+        native_top = max(0, min(int(round(top / scale)), raw_h - 1))
+        native_left = max(0, min(int(round(left / scale)), raw_w - 1))
+        native_h = min(int(round(target_h / scale)), raw_h - native_top)
+        native_w = min(int(round(target_w / scale)), raw_w - native_left)
+        image = raw_image[native_top:native_top + native_h:d,
+                          native_left:native_left + native_w:d]
+        masks = MaskDict({k: v[native_top:native_top + native_h:d,
+                               native_left:native_left + native_w:d]
+                          for k, v in raw_masks.items()}, shape=image.shape[:2])
+        # frame.K_matrix is for the strided crop; native/target carries it over.
+        K = frame.K_matrix.copy()
+        K[0, :] *= native_w / target_w
+        K[1, :] *= native_h / target_h
+        native_h, native_w = image.shape[:2]
+
+        cap = self.native_resolution_max_scale * self.recon_resolution_set
+        if max(native_h, native_w) > cap:
+            cap_scale = cap / max(native_h, native_w)
+            cap_h, cap_w = max(1, int(round(native_h * cap_scale))), max(1, int(round(native_w * cap_scale)))
+            image = cv2.resize(image, (cap_w, cap_h), interpolation=cv2.INTER_AREA)
+            masks = MaskDict({k: cv2.resize(v.astype(np.uint8), (cap_w, cap_h),
+                                            interpolation=cv2.INTER_NEAREST).astype(bool)
+                              for k, v in masks.items()}, shape=(cap_h, cap_w))
+            K[0, :] *= cap_w / native_w
+            K[1, :] *= cap_h / native_h
+        return image, masks, K
 
     def __contains__(self, key) -> bool:
         """Check if a FrameKey (or coerced int) is loaded."""

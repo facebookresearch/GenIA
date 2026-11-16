@@ -82,10 +82,31 @@ def run(cfg: DictConfig) -> None:
 
 def _run_blocks(cfg: DictConfig) -> None:
     """PREPROCESSING, the block loop, FINAL."""
+    from genia.core.final import run_final
+
+    out = run_blocks(cfg)
+    if out is None:
+        return
+    state, sequence, pipeline, evaluator, device, timer = out
+
+    # FINAL: Save poses, PLY, interpolated videos, tracks (always runs)
+    run_final(cfg, state, sequence, pipeline.pipeline_obj, evaluator, device, timer=timer)
+
+    print(f"\n{'='*60}")
+    print("Pipeline complete!")
+    print(f"{'='*60}")
+
+
+def run_blocks(cfg: DictConfig, *, emit_preprocessing: bool = True):
+    """PREPROCESSING and the block loop: everything but FINAL.
+
+    Returns ``(state, sequence, pipeline, evaluator, device, timer)``, or None when a
+    block's ``exit_after`` ended the run. A host with its own FINAL calls this directly,
+    with ``emit_preprocessing=False`` when it writes ``preprocessing/`` itself.
+    """
     import torch
 
     from genia.core.evaluator import Evaluator
-    from genia.core.final import run_final
     from genia.core.manifest import BLOCKS
     from genia.core.pipeline import Pipeline
     from genia.core.preprocessing import resolve_run_assets, run_preprocessing
@@ -119,7 +140,8 @@ def _run_blocks(cfg: DictConfig) -> None:
     # PREPROCESSING (always-runs-first stage, like FINAL): build + process the
     # Sequence for every downstream consumer, and emit processing diagnostics to
     # the unprefixed preprocessing/ folder.
-    sequence = run_preprocessing(cfg, frame_indices, view_indices, asset_indices)
+    sequence = run_preprocessing(cfg, frame_indices, view_indices, asset_indices,
+                                 emit=emit_preprocessing)
     pipeline.bind(sequence, evaluator, device)
 
     # The loop walks every block; a disabled block's runner self-skips at entry.
@@ -179,14 +201,9 @@ def _run_blocks(cfg: DictConfig) -> None:
         if getattr(block_config(cfg, block_name), "exit_after", False):
             print(f"\n[exit_after] Exiting after block '{block_name}'.")
             _save_timing_outputs(cfg, timer)
-            return
+            return None
 
-    # FINAL: Save poses, PLY, interpolated videos, tracks (always runs)
-    run_final(cfg, state, sequence, pipeline.pipeline_obj, evaluator, device, timer=timer)
-
-    print(f"\n{'='*60}")
-    print("Pipeline complete!")
-    print(f"{'='*60}")
+    return state, sequence, pipeline, evaluator, device, timer
 
 
 def _remove_empty_dirs(path: str) -> None:

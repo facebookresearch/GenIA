@@ -1,3 +1,16 @@
+diff --git a/sam3d_objects/__init__.py b/sam3d_objects/__init__.py
+index a700544..94b09e4 100644
+--- a/sam3d_objects/__init__.py
++++ b/sam3d_objects/__init__.py
+@@ -1,6 +1,3 @@
+ # Copyright (c) Meta Platforms, Inc. and affiliates.
+-import os
+-
+-# Allow skipping initialization for lightweight tools
+-if not os.environ.get('LIDRA_SKIP_INIT'):
+-    import sam3d_objects.init
++# Upstream imports ``sam3d_objects.init`` here unless LIDRA_SKIP_INIT is set: a startup module it
++# does not ship, so the import always failed without the variable. Removed.
 diff --git a/sam3d_objects/model/backbone/generator/flow_matching/model.py b/sam3d_objects/model/backbone/generator/flow_matching/model.py
 index c76b7be..55fe2a8 100644
 --- a/sam3d_objects/model/backbone/generator/flow_matching/model.py
@@ -169,7 +182,7 @@ index 1abbeeb..8855771 100755
  
  def __from_env():
 diff --git a/sam3d_objects/model/backbone/tdfy_dit/modules/sparse/attention/full_attn.py b/sam3d_objects/model/backbone/tdfy_dit/modules/sparse/attention/full_attn.py
-index 1149b1e..4d376c7 100755
+index 1149b1e..2dfe40c 100755
 --- a/sam3d_objects/model/backbone/tdfy_dit/modules/sparse/attention/full_attn.py
 +++ b/sam3d_objects/model/backbone/tdfy_dit/modules/sparse/attention/full_attn.py
 @@ -106,7 +106,7 @@ def sparse_scaled_dot_product_attention(
@@ -181,13 +194,16 @@ index 1149b1e..4d376c7 100755
      arg_names_dict = {1: ["qkv"], 2: ["q", "kv"], 3: ["q", "k", "v"]}
      num_all_args = len(args) + len(kwargs)
      assert (
-@@ -264,8 +264,18 @@ def sparse_scaled_dot_product_attention(*args, **kwargs):
+@@ -264,8 +264,21 @@ def sparse_scaled_dot_product_attention(*args, **kwargs):
          q = q.unsqueeze(0)
          k = k.unsqueeze(0)
          v = v.unsqueeze(0)
 -        mask = xops.fmha.BlockDiagonalMask.from_seqlens(q_seqlen, kv_seqlen)
 -        out = xops.memory_efficient_attention(q, k, v, mask)[0]
-+        if attn_bias is not None:
++        if attn_bias is not None and hasattr(attn_bias, "attend"):
++            # A structured bias (genia's FootprintBias) runs the attention itself.
++            out = attn_bias.attend(q, k, v, q_seqlen, kv_seqlen)
++        elif attn_bias is not None:
 +            # Per-view xformers MEA loop with additive bias: keeps the fused kernel
 +            # (no dense (sum_q, sum_kv) score/mask/bias materialization).
 +            from .masked_sdpa import xops_blockdiag_with_bias

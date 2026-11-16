@@ -36,8 +36,11 @@ Usage::
         SparseVisibilityBiasHook, build_voxel_patch_mask,
     )
 
-    # Build mask from voxel→pixel coords (from compute_visibility_multi_object)
-    mask = build_voxel_patch_mask(pixel_coords_view0, L_original)
+    # Build mask from voxel→pixel coords (from compute_visibility_multi_object),
+    # mapped into the 518x518 DINOv2 input first
+    vids, pixels = flatten_pixel_coords(pixel_coords_view0)
+    mask = build_voxel_patch_mask(vids, transform_pixels_to_518(pixels, obj_mask),
+                                  L_original)
 
     # Hook into all cross-attention blocks
     hooks = []
@@ -61,6 +64,9 @@ from typing import Dict, List, Optional, Sequence, Tuple
 import numpy as np
 import torch
 import torch.nn.functional as F
+import triton
+import triton.language as tl
+import xformers.ops as xops
 
 
 # =====================================================================
@@ -104,12 +110,27 @@ _DOWNSAMPLE_FACTOR = (2, 2, 2)
 _DINOV2_SIZE = 518  # DINOv2 input resolution
 
 
-def transform_pixels_to_518(
+def flatten_pixel_coords(
     pixel_coords: Dict[int, np.ndarray],
+) -> Tuple[np.ndarray, np.ndarray]:
+    """``{voxel_idx: (M, 2) (row, col)}`` -> ``(vids (K,) int64, pixels (K, 2))``: every
+    voxel's pixels concatenated in dict order, each row tagged with its voxel.  Voxels with
+    no pixel contribute nothing.  The flat form the transforms and the mask builder take,
+    so none of them loops over voxels in Python."""
+    items = [(v, p) for v, p in pixel_coords.items() if len(p) > 0]
+    if not items:
+        return np.zeros(0, dtype=np.int64), np.zeros((0, 2), dtype=np.int64)
+    vids = np.repeat(np.fromiter((v for v, _ in items), dtype=np.int64, count=len(items)),
+                     [len(p) for _, p in items])
+    return vids, np.concatenate([p for _, p in items])
+
+
+def transform_pixels_to_518(
+    pixels: np.ndarray,
     mask: np.ndarray,
     box_size_factor: float = 1.0,
     padding_factor: float = 0.1,
-) -> Dict[int, np.ndarray]:
+) -> np.ndarray:
     """Transform pixel coordinates from original image space to 518×518
     DINOv2 input space.
 
@@ -119,8 +140,9 @@ def transform_pixels_to_518(
 
     Parameters
     ----------
-    pixel_coords : dict[int, ndarray]
-        ``{voxel_idx: (M, 2) int}`` in original image space ``(row, col)``.
+    pixels : ndarray (K, 2)
+        Pixel coords ``(row, col)`` in original image space
+        (:func:`flatten_pixel_coords`).
     mask : ndarray (H, W)
         Binary object mask in original image space (used to compute bbox).
     box_size_factor : float
@@ -130,16 +152,17 @@ def transform_pixels_to_518(
 
     Returns
     -------
-    transformed : dict[int, ndarray]
-        Same structure, pixel coords in 518×518 space ``(row_518, col_518)``.
+    transformed : ndarray (K, 2) int32
+        The same pixels in 518×518 space ``(row_518, col_518)``; returned
+        unchanged when the mask is empty (no transform possible).
     """
     # Replicate compute_mask_bbox logic (from img_and_mask_transforms.py:335)
     ys, xs = np.nonzero(mask)
     if len(ys) == 0:
-        return pixel_coords  # empty mask — no transform possible
-
+        return pixels  # empty mask — no transform possible
     min_x, max_x = int(xs.min()), int(xs.max())
     min_y, max_y = int(ys.min()), int(ys.max())
+
     center_x = (min_x + max_x) / 2
     center_y = (min_y + max_y) / 2
     bbox_w = max_x - min_x
@@ -168,26 +191,16 @@ def transform_pixels_to_518(
     # Scale to 518
     scale = _DINOV2_SIZE / S_ext
 
-    transformed = {}
-    for voxel_idx, pixels in pixel_coords.items():
-        if len(pixels) == 0:
-            transformed[voxel_idx] = pixels
-            continue
-        rows = pixels[:, 0].astype(np.float64)
-        cols = pixels[:, 1].astype(np.float64)
-
-        # Apply: crop → pad → extend → scale
-        # Use pixel-center convention: (r + 0.5) * scale - 0.5
-        r_pre = (rows - y1) + pad_h + ext
-        c_pre = (cols - x1) + pad_w + ext
-        r_518 = (r_pre + 0.5) * scale - 0.5
-        c_518 = (c_pre + 0.5) * scale - 0.5
-
-        transformed[voxel_idx] = np.stack(
-            [np.floor(r_518).astype(np.int32),
-             np.floor(c_518).astype(np.int32)], axis=1,
-        )
-    return transformed
+    rows = pixels[:, 0].astype(np.float64)
+    cols = pixels[:, 1].astype(np.float64)
+    # Apply: crop → pad → extend → scale
+    # Use pixel-center convention: (r + 0.5) * scale - 0.5
+    r_pre = (rows - y1) + pad_h + ext
+    c_pre = (cols - x1) + pad_w + ext
+    r_518 = (r_pre + 0.5) * scale - 0.5
+    c_518 = (c_pre + 0.5) * scale - 0.5
+    return np.stack([np.floor(r_518).astype(np.int32),
+                     np.floor(c_518).astype(np.int32)], axis=1)
 
 
 # =====================================================================
@@ -199,10 +212,10 @@ def transform_pixels_to_518(
 
 
 def transform_pixels_to_518_full_image(
-    pixel_coords: Dict[int, np.ndarray],
+    pixels: np.ndarray,
     H: int,
     W: int,
-) -> Dict[int, np.ndarray]:
+) -> np.ndarray:
     """Transform pixel coordinates from original image space to 518×518
     DINOv2 input space for the **full-image** conditioning stream.
 
@@ -210,15 +223,15 @@ def transform_pixels_to_518_full_image(
 
     Parameters
     ----------
-    pixel_coords : dict[int, ndarray]
-        ``{voxel_idx: (M, 2) int}`` in original image space ``(row, col)``.
+    pixels : ndarray (K, 2)
+        Pixel coords ``(row, col)`` in original image space.
     H, W : int
         Original image dimensions.
 
     Returns
     -------
-    transformed : dict[int, ndarray]
-        Same structure, pixel coords in 518×518 space ``(row_518, col_518)``.
+    transformed : ndarray (K, 2) int32
+        The same pixels in 518×518 space ``(row_518, col_518)``.
     """
     S = max(H, W)
     diff = abs(H - W)
@@ -230,26 +243,15 @@ def transform_pixels_to_518_full_image(
     else:
         pad_top = pad1
         pad_left = 0
-
     scale = _DINOV2_SIZE / S
 
-    transformed = {}
-    for voxel_idx, pixels in pixel_coords.items():
-        if len(pixels) == 0:
-            transformed[voxel_idx] = pixels
-            continue
-        rows = pixels[:, 0].astype(np.float64)
-        cols = pixels[:, 1].astype(np.float64)
-
-        # pad_to_square_centered shifts then resize scales
-        r_518 = (rows + pad_top + 0.5) * scale - 0.5
-        c_518 = (cols + pad_left + 0.5) * scale - 0.5
-
-        transformed[voxel_idx] = np.stack(
-            [np.floor(r_518).astype(np.int32),
-             np.floor(c_518).astype(np.int32)], axis=1,
-        )
-    return transformed
+    rows = pixels[:, 0].astype(np.float64)
+    cols = pixels[:, 1].astype(np.float64)
+    # pad_to_square_centered shifts then resize scales
+    r_518 = (rows + pad_top + 0.5) * scale - 0.5
+    c_518 = (cols + pad_left + 0.5) * scale - 0.5
+    return np.stack([np.floor(r_518).astype(np.int32),
+                     np.floor(c_518).astype(np.int32)], axis=1)
 
 
 # =====================================================================
@@ -257,23 +259,26 @@ def transform_pixels_to_518_full_image(
 # =====================================================================
 
 def build_voxel_patch_mask(
-    pixel_coords: Dict[int, np.ndarray],
+    vids: np.ndarray,
+    pixels: np.ndarray,
     L_original: int,
     patch_size: int = VIT_PATCH_SIZE,
     grid_h: int = VIT_GRID_H,
     grid_w: int = VIT_GRID_W,
     dilate_patches: int = 1,
+    device: "torch.device | str" = "cpu",
 ) -> torch.Tensor:
     """Build a boolean voxel→patch mapping from pixel coordinates.
 
-    **Important**: ``pixel_coords`` must be in 518×518 DINOv2 input space
+    **Important**: ``pixels`` must be in 518×518 DINOv2 input space
     (use :func:`transform_pixels_to_518` first if they are in original
     image space).
 
     Parameters
     ----------
-    pixel_coords : dict[int, ndarray]
-        ``{voxel_idx: (M, 2) int}`` in **518×518 space** ``(row, col)``.
+    vids, pixels : ndarray (K,), (K, 2)
+        Each pixel's voxel and its ``(row, col)`` in **518×518 space**
+        (:func:`flatten_pixel_coords`, then a transform).
     L_original : int
         Total number of voxels at original resolution.
     dilate_patches : int
@@ -281,50 +286,33 @@ def build_voxel_patch_mask(
         Default 1 adds a 1-patch border around every occupied patch,
         compensating for projection quantization and patch-boundary
         effects.  Set to 0 to disable.
+    device : the device the mask is built (and dilated) on; the hook moves it to
+        the backbone's anyway, and a GPU dilates the ``(L, 37, 37)`` grid ~100x faster.
 
     Returns
     -------
     mask : torch.Tensor
         Boolean ``(L_original, NUM_PATCHES)`` — True where voxel ``i``
         has at least one pixel in patch ``j`` (or a neighboring patch
-        within ``dilate_patches``).  Occluded voxels (not in
-        ``pixel_coords``) have all-False rows.
+        within ``dilate_patches``).  Occluded voxels (no pixels) have
+        all-False rows.
     """
     num_patches = grid_h * grid_w
     img_size = grid_h * patch_size  # 518
-
-    # Vectorized: collect all (voxel_idx, row, col) into flat arrays
-    vids_list, rows_list, cols_list = [], [], []
-    for voxel_idx, pixels in pixel_coords.items():
-        if voxel_idx >= L_original or len(pixels) == 0:
-            continue
-        n = len(pixels)
-        vids_list.append(np.full(n, voxel_idx, dtype=np.int64))
-        rows_list.append(pixels[:, 0].astype(np.int64))
-        cols_list.append(pixels[:, 1].astype(np.int64))
-
-    mask = torch.zeros(L_original, num_patches, dtype=torch.bool)
-    if not vids_list:
+    mask = torch.zeros(L_original, num_patches, dtype=torch.bool, device=device)
+    rows = pixels[:, 0].astype(np.int64)
+    cols = pixels[:, 1].astype(np.int64)
+    # Drop out-of-range voxels and out-of-bounds pixels
+    valid = ((vids < L_original) & (rows >= 0) & (rows < img_size)
+             & (cols >= 0) & (cols < img_size))
+    if not valid.any():
         return mask
-
-    vids = np.concatenate(vids_list)
-    rows = np.concatenate(rows_list)
-    cols = np.concatenate(cols_list)
-
-    # Filter out-of-bounds pixels
-    valid = (rows >= 0) & (rows < img_size) & (cols >= 0) & (cols < img_size)
     vids, rows, cols = vids[valid], rows[valid], cols[valid]
-    if len(vids) == 0:
-        return mask
-
-    # Compute patch indices and deduplicate (voxel, patch) pairs
+    # Repeated (voxel, patch) pairs set the same entry: no dedup needed
     patch_idx = (rows // patch_size) * grid_w + (cols // patch_size)
-    pairs = np.unique(np.column_stack([vids, patch_idx]), axis=0)
-    mask[pairs[:, 0], pairs[:, 1]] = True
-
+    mask[torch.from_numpy(vids).to(device), torch.from_numpy(patch_idx).to(device)] = True
     if dilate_patches > 0:
         mask = _dilate_patch_grid(mask, grid_h, grid_w, dilate_patches)
-
     return mask
 
 
@@ -391,6 +379,256 @@ def _downsample_mask_local(
 
 
 # =====================================================================
+# Structured bias: the same additive bias, never materialized
+# =====================================================================
+
+@triton.jit
+def _merge_correct_kernel(
+    Q, K, V, O1, L1, O2, L2, OUT, C, PTR, KEYS, FIX, VKV, gain, scale,
+    stride_qr, stride_qh, stride_kr, stride_kh, stride_vr, stride_vh,
+    stride_o1r, stride_o1h, stride_o2r, stride_o2h, stride_or, stride_oh, stride_lh,
+    N_FIX: tl.constexpr, TWO: tl.constexpr, HAS_C: tl.constexpr, H: tl.constexpr,
+    D: tl.constexpr,
+):
+    """One row, all heads, of :meth:`FootprintBias.attend`: merge the FlashAttention call(s),
+    then apply the footprint's ``+alpha`` and undo ``-c_i`` where it does not belong.
+
+    ``O1``/``L1``: output and log-sum-exp over keys ``[0, E)`` of the row's view, ``O2``/``L2``
+    over ``[E, kv_len)`` (``TWO``).  ``-c_i`` (``HAS_C``) applies to every key of the first
+    call, so it shifts ``L1`` by ``-c_i``; the passive keys inside ``[0, E)`` (``FIX``, local
+    offsets) must not have it, so their weight is multiplied back by ``e^c_i``, and the
+    footprint keys' (``KEYS[PTR[row]:PTR[row+1]]``, packed) by ``e^alpha``.  A key's weight in
+    the merged attention is ``exp(logit - c_i - lse)``; multiplying it by ``e^delta`` adds
+    ``r = expm1(delta) * exp(logit - c_i - lse)`` to the normaliser and ``r v`` to the output,
+    so the biased softmax is ``(out + sum r v) / (1 + sum r)``.  ``logit - c_i - lse <= 0``,
+    so nothing overflows.  Each program holds the row's (H, D) tile, so every load is one
+    contiguous row of all heads."""
+    row = tl.program_id(0)
+    hs = tl.arange(0, H)
+    d = tl.arange(0, D)[None, :]
+    o = tl.load(O1 + row * stride_o1r + hs[:, None] * stride_o1h + d).to(tl.float32)
+    lse = tl.load(L1 + hs * stride_lh + row)
+    c = 0.0
+    if HAS_C:
+        c = tl.load(C + row)
+        lse -= c
+    if TWO:
+        o2 = tl.load(O2 + row * stride_o2r + hs[:, None] * stride_o2h + d).to(tl.float32)
+        lse2 = tl.load(L2 + hs * stride_lh + row)
+        m = tl.maximum(lse, lse2)
+        w1 = tl.exp(lse - m)
+        w2 = tl.exp(lse2 - m)
+        o = (w1[:, None] * o + w2[:, None] * o2) / (w1 + w2)[:, None]
+        lse = m + tl.log(w1 + w2)
+    start = tl.load(PTR + row)
+    end = tl.load(PTR + row + 1)
+    if end > start:  # a visible row: the only ones with a footprint, and with c_i > 0
+        q = tl.load(Q + row * stride_qr + hs[:, None] * stride_qh + d).to(tl.float32)
+        acc = tl.zeros([H, D], dtype=tl.float32)
+        den = tl.zeros([H], dtype=tl.float32)
+        for f in range(start, end):
+            key = tl.load(KEYS + f)
+            k = tl.load(K + key * stride_kr + hs[:, None] * stride_kh + d).to(tl.float32)
+            v = tl.load(V + key * stride_vr + hs[:, None] * stride_vh + d).to(tl.float32)
+            r = gain * tl.exp(tl.sum(q * k, axis=1) * scale - c - lse)
+            acc += r[:, None] * v
+            den += r
+        if HAS_C:
+            base = tl.load(VKV + row)
+            gain_fix = tl.exp(c) - 1.0
+            for f in range(N_FIX):
+                key = base + tl.load(FIX + f)
+                k = tl.load(K + key * stride_kr + hs[:, None] * stride_kh + d).to(tl.float32)
+                v = tl.load(V + key * stride_vr + hs[:, None] * stride_vh + d).to(tl.float32)
+                r = gain_fix * tl.exp(tl.sum(q * k, axis=1) * scale - c - lse)
+                acc += r[:, None] * v
+                den += r
+        o = (o + acc) / (1.0 + den)[:, None]
+    tl.store(OUT + row * stride_or + hs[:, None] * stride_oh + d, o.to(OUT.dtype.element_ty))
+
+
+def _flash_available(device) -> bool:
+    """xformers' FlashAttention (gappy keys, log-sum-exp) runs on sm80+ only; below,
+    :meth:`FootprintBias.attend` uses PyTorch's memory-efficient kernel per view."""
+    return torch.cuda.get_device_capability(device) >= (8, 0)
+
+
+class FootprintBias:
+    """The hook's additive bias in the form it has, not as a dense ``(N, 1, L, P)`` tensor.
+
+    Per query row ``i`` (packed over views) the bias is ``alpha`` on the keys of its
+    footprint ``F_i`` (the patches the voxel projects onto, on the enabled streams) and
+    ``-c_i`` on every active-stream key (the ``approx`` compensation; ``c`` is None when it is
+    off).  :meth:`attend` computes exactly the biased attention with FlashAttention at the
+    model's own head dimension, on the K/V as they are: the keys of each view split at ``E``
+    (the end of the last active stream), one call per side (one call when ``c`` is None or
+    nothing lies past ``E``), each returning its log-sum-exp; :func:`_merge_correct_kernel`
+    merges them with ``-c_i`` on the first and corrects the few keys whose bias differs from
+    their side's: the footprint (``+alpha``) and the passive keys before ``E`` (``FIX``: the
+    CLS/register tokens of the active streams, no ``-c_i``).  A dense bias would keep xformers
+    off FlashAttention and cost a per-call fp16 cast + 16-head copy of it.
+
+    ``ptr`` (T+1,) slices ``keys`` per packed query row (packed key indices, view ``i``'s
+    keys offset by ``i * kv_len``); ``fix`` (local offsets) and ``view_kv`` (T,), each row's
+    view offset ``i * kv_len``, are set when ``c`` is.
+    """
+
+    NUM_WARPS = 4  # of the merge kernel (fastest on an A100)
+
+    def __init__(self, alpha, q_seqlen, kv_len, ptr, keys, c=None, split=None, fix=None,
+                 view_kv=None):
+        self.alpha = float(alpha)
+        self.q_seqlen = [int(x) for x in q_seqlen]
+        self.kv_len = int(kv_len)
+        self.ptr, self.keys = ptr, keys
+        self.c, self.fix, self.view_kv = c, fix, view_kv
+        self.split = int(split) if split is not None else self.kv_len
+
+    def attend(self, q, k, v, q_seqlen, kv_seqlen):
+        """``q`` (1, sum_q, H, D), ``k``/``v`` (1, sum_kv, H, D) -> (sum_q, H, D)."""
+        N, P, E = len(self.q_seqlen), self.kv_len, self.split
+        if list(q_seqlen) != self.q_seqlen or list(kv_seqlen) != [P] * N:
+            raise ValueError(
+                f"FootprintBias built for q {self.q_seqlen} / kv {[P] * N}, "
+                f"called with q {list(q_seqlen)} / kv {list(kv_seqlen)}")
+        T, H, D = q.shape[1], q.shape[2], q.shape[3]
+        scale = 1.0 / math.sqrt(D)
+        two = E < P
+        if _flash_available(q.device):
+            gappy = xops.fmha.attn_bias.BlockDiagonalGappyKeysMask.from_seqlens
+            starts = [i * P for i in range(N)]
+            if two:
+                o1, l1 = xops.fmha.memory_efficient_attention_partial(
+                    q, k, v, gappy(self.q_seqlen, starts + [N * P], [E] * N), scale=scale)
+                o2, l2 = xops.fmha.memory_efficient_attention_partial(
+                    q, k, v, gappy(self.q_seqlen, [s + E for s in starts] + [N * P],
+                                   [P - E] * N), scale=scale)
+                o2, l2 = o2[0], l2.reshape(H, T)
+            else:
+                o1, l1 = xops.fmha.memory_efficient_attention_partial(
+                    q, k, v, xops.fmha.BlockDiagonalMask.from_seqlens(self.q_seqlen, [P] * N),
+                    scale=scale)
+            o1, l1 = o1[0], l1.reshape(H, T)
+        else:
+            outs = self._per_view_attention(q, k, v, scale, [(0, E), (E, P)] if two else [(0, P)])
+            (o1, l1), (o2, l2) = outs[0], outs[-1]
+        if not two:
+            o2, l2 = o1, l1  # unread when TWO is False
+        q3, k3, v3 = q[0], k[0], v[0]
+        if q3.stride(-1) != 1 or k3.stride(-1) != 1 or v3.stride(-1) != 1:
+            q3, k3, v3 = q3.contiguous(), k3.contiguous(), v3.contiguous()
+        out = torch.empty(T, H, D, dtype=q.dtype, device=q.device)
+        has_c = self.c is not None
+        _merge_correct_kernel[(T,)](
+            q3, k3, v3, o1, l1, o2, l2, out,
+            self.c if has_c else l1, self.ptr, self.keys,
+            self.fix if has_c else self.ptr, self.view_kv if has_c else self.ptr,
+            math.expm1(self.alpha), scale,
+            q3.stride(0), q3.stride(1), k3.stride(0), k3.stride(1), v3.stride(0), v3.stride(1),
+            o1.stride(0), o1.stride(1), o2.stride(0), o2.stride(1), out.stride(0), out.stride(1),
+            l1.stride(0),
+            N_FIX=self.fix.numel() if has_c else 0, TWO=two, HAS_C=has_c, H=H, D=D,
+            num_warps=self.NUM_WARPS,
+        )
+        return out
+
+    def _per_view_attention(self, q, k, v, scale, ranges):
+        """Below sm80 (2080 Ti), where xformers has no FlashAttention and its cutlass kernel no
+        log-sum-exp: PyTorch's memory-efficient kernel (sm50+), one call per view and key range
+        ``ranges`` (slices of the K/V, no copies).  -> per range ``(out (T, H, D), lse (H, T))``,
+        the layout of the xformers path."""
+        P = self.kv_len
+        outs = [([], []) for _ in ranges]
+        qo = 0
+        for i, L in enumerate(self.q_seqlen):
+            qi = q[:, qo:qo + L].transpose(1, 2)
+            for (o_list, l_list), (s, e) in zip(outs, ranges):
+                o, lse = torch.ops.aten._scaled_dot_product_efficient_attention(
+                    qi, k[:, i * P + s:i * P + e].transpose(1, 2),
+                    v[:, i * P + s:i * P + e].transpose(1, 2), None, True, scale=scale)[:2]
+                o_list.append(o[0].transpose(0, 1))
+                l_list.append(lse[0, :, :L])  # the kernel pads its lse rows to 32
+            qo += L
+        return [(torch.cat(o), torch.cat(l, 1)) for o, l in outs]
+
+    def to_dense(self) -> torch.Tensor:
+        """The ``(N, 1, max L, kv_len)`` fp32 bias it stands for (debug capture, tests)."""
+        N, P = len(self.q_seqlen), self.kv_len
+        dev = self.keys.device
+        offs = torch.tensor([0] + self.q_seqlen, device=dev).cumsum(0)
+        dense = torch.zeros(N, 1, max(self.q_seqlen), P, device=dev)
+        counts = (self.ptr[1:] - self.ptr[:-1]).long()
+        rows = torch.arange(int(offs[-1]), device=dev).repeat_interleave(counts)
+        view = torch.searchsorted(offs[1:], rows, right=True)
+        keys = self.keys.long()
+        dense[view, 0, rows - offs[view], keys - view * P] = self.alpha
+        if self.c is not None:
+            act = torch.ones(P, dtype=torch.bool, device=dev)
+            act[self.split:] = False
+            act[self.fix.long()] = False
+            for n in range(N):
+                block = dense[n, 0, :self.q_seqlen[n]]
+                block[:, act] -= self.c[offs[n]:offs[n + 1], None]
+        return dense
+
+
+def build_footprint_bias(
+    streams: Sequence[Tuple[int, int, "Optional[List[torch.Tensor]]", bool]],
+    L_down_list: Sequence[int],
+    P_total: int,
+    alpha: float,
+    compensate: bool,
+) -> FootprintBias:
+    """The :class:`FootprintBias` of the hook's per-view, per-stream masks.
+
+    ``streams``: ``(start, end, masks, enabled)`` per DINO stream, ``masks`` a per-view list of
+    ``(L_down_i, end - start)`` bool or None.  A stream contributes footprint keys when it is
+    enabled, has masks and lies inside the context (``end <= P_total``), the hook's rule;
+    the active streams are those, the passive ones the rest in range.  ``compensate``:
+    ``approx`` compensation, applied (as in the hook) only when both kinds exist;
+    ``c_i = log(v e^alpha + 1 - v)`` with ``v`` = the row's footprint keys / active keys."""
+    N = len(L_down_list)
+    device = next(m[0].device for _, _, m, _ in streams if m)
+    q_offs = [0]
+    for L in L_down_list:
+        q_offs.append(q_offs[-1] + int(L))
+    active_ranges, n_passive = [], 0
+    rows, keys = [], []
+    for start, end, masks, enabled in streams:
+        if end > P_total:
+            continue
+        if not (enabled and masks):
+            n_passive += 1
+            continue
+        active_ranges.append((start, end))
+        for i in range(N):
+            r, col = masks[i].nonzero(as_tuple=True)
+            rows.append(r + q_offs[i])
+            keys.append(col + start + i * P_total)
+    T = q_offs[-1]
+    rows = torch.cat(rows) if rows else torch.zeros(0, dtype=torch.long, device=device)
+    keys = torch.cat(keys) if keys else torch.zeros(0, dtype=torch.long, device=device)
+    order = torch.argsort(rows, stable=True)
+    rows, keys = rows[order], keys[order]
+    counts = torch.bincount(rows, minlength=T)
+    ptr = torch.zeros(T + 1, dtype=torch.long, device=device)
+    ptr[1:] = counts.cumsum(0)
+    c = split = fix = view_kv = None
+    if compensate and active_ranges and n_passive:
+        n_active = sum(e - s for s, e in active_ranges)
+        c = torch.log1p(counts.float() / n_active * math.expm1(alpha))
+        split = max(e for _, e in active_ranges)
+        act = torch.zeros(split, dtype=torch.bool, device=device)
+        for s, e in active_ranges:
+            act[s:e] = True
+        fix = (~act).nonzero().squeeze(1).int()
+        view_kv = torch.cat([torch.full((int(L),), i * P_total, dtype=torch.int32, device=device)
+                             for i, L in enumerate(L_down_list)])
+    return FootprintBias(alpha, L_down_list, P_total, ptr.int(), keys.int(),
+                         c=c, split=split, fix=fix, view_kv=view_kv)
+
+
+# =====================================================================
 # Forward hook for visibility-biased cross-attention
 # =====================================================================
 
@@ -432,11 +670,7 @@ class SparseVisibilityBiasHook:
         deformed grids).  ``None`` (the default) keeps the rectangular
         behaviour exactly, so ``stage2_mv`` is unaffected by construction.
 
-        The bias is then allocated at ``max(L_down_i)`` and each view's rows
-        are written into ``[:L_down_i]``, leaving the tail zero.  Nothing ever
-        reads that padding: ``masked_sdpa`` slices ``attn_bias[i, :, :bq, :bkv]``
-        with ``bq = min(bias_q, q_len)`` and the xformers path does the same in
-        ``_slice_view_bias``, so each view sees only its own rows.
+        The bias then packs each view's rows at its own length.
     compensate_passive_streams : str
         ``"off"`` or ``"approx"`` (see the module docstring).
     debug : bool
@@ -513,12 +747,12 @@ class SparseVisibilityBiasHook:
         # Store masks; will be downsampled lazily on first pre-hook call
         self._masks_original = voxel_patch_mask  # list[(L_original, P_patches)] bool
         self._masks_original_full = voxel_patch_mask_full  # list or None
-        self._bias: Optional[torch.Tensor] = None  # (N, 1, L_down, P_total)
+        self._bias: Optional[FootprintBias] = None
         self._masks_downsampled: Optional[List[torch.Tensor]] = None
         self._masks_downsampled_full: Optional[List[torch.Tensor]] = None
         self._L_down_list: Optional[List[int]] = None
         # Optional shared cache: hooks created together (same masks/N/alpha)
-        # can share a single bias tensor instead of holding one copy per layer.
+        # can share a single bias instead of holding one copy per layer.
         self._shared_state = shared_state
 
         # CFG-aware activation: only bias the conditional forward pass
@@ -534,25 +768,20 @@ class SparseVisibilityBiasHook:
             self._pre_hook_fn, with_kwargs=True,
         )
 
-    def _build_bias(self, query_sparse, context) -> torch.Tensor:
-        """Build the additive attention bias tensor on first call.
+    def _build_bias(self, query_sparse, context) -> FootprintBias:
+        """Build the attention bias on first call: a :class:`FootprintBias`.
 
         Downsamples each view's voxel→patch mask from L_original to
-        L_down, then stores one ``(N, 1, L_down_max, P_total)`` stacked
-        tensor — the per-view blocks of a block-diagonal bias, without the
-        always-zero off-diagonal blocks.
+        L_down, then turns the per-view, per-stream masks into the structured
+        bias (footprint keys per packed row, compensation per row).
 
         RECTANGULAR (``per_view_L is None``): every view has the same
-        ``L_down = total_points // N``, the parent map is taken from batch 0
-        and reused, and the tail slice below is a no-op.
+        ``L_down = total_points // N`` and the parent map is taken from batch 0
+        and reused.
 
         RAGGED (``per_view_L`` set): each view has its OWN length and its OWN
-        parent map, both derived from the layouts rather than from a division.
-        The tensor is allocated at ``max(L_down_i)`` and view ``i`` writes only
-        ``[:L_down_i]``; the padding stays ZERO and is never read (see the
-        ``per_view_L`` note in the class docstring).  Zero, not ``-inf``:
-        the ``approx`` compensation below runs ``logsumexp`` over whole rows,
-        and ``-inf`` padding would poison it.
+        parent map, both derived from the layouts rather than from a division;
+        the rows are packed at those lengths, so there is no padding.
         """
         P_total = context.shape[1]
 
@@ -596,7 +825,6 @@ class SparseVisibilityBiasHook:
         else:
             L_down = query_sparse.feats.shape[0] // N
             L_down_list = [L_down] * N
-        L_down_max = max(L_down_list)
         self._L_down_list = L_down_list
 
         # --- Downsample per-view masks ---
@@ -640,86 +868,17 @@ class SparseVisibilityBiasHook:
         self._masks_downsampled = masks_down
         self._masks_downsampled_full = masks_down_full or None
 
-        # --- Build block-diagonal bias ---
-        def _apply_stream_bias(bias_slice, mask_d, start, end, enabled):
-            """Fill a (L_down, P_total) bias slice for one stream."""
-            if not enabled or end > P_total:
-                return
-            bias_slice[:, start:end] = self.alpha * mask_d.float()
-
-        # Stacked per-view storage: (N, 1, L_down, P_total). N× smaller than
-        # the dense (1, 1, N*L_down, N*P_total) form, since the off-diagonal
-        # blocks are always zero (block-diagonal structure). Consumer
-        # (xops_blockdiag_with_bias / masked_sdpa) reconstructs the diagonal
-        # placement on the fly.
-        full_bias = torch.zeros(
-            N, 1, L_down_max, P_total,
-            device=device, dtype=torch.float32,
+        # --- The bias, structured: footprint keys per row + compensation ---
+        full = masks_down_full or None
+        return build_footprint_bias(
+            [(self.patch_start, self.patch_end, masks_down, self._enable_cropped_image),
+             (self.full_patch_start, self.full_patch_end, full, self._enable_full_image),
+             (CROPPED_MASK_PATCH_START, CROPPED_MASK_PATCH_END, masks_down,
+              self._enable_cropped_mask),
+             (FULL_MASK_PATCH_START, FULL_MASK_PATCH_END, full, self._enable_full_mask)],
+            L_down_list, P_total, self.alpha,
+            compensate=self._compensate_passive_streams == "approx",
         )
-        for i in range(N):
-            # (L_down_i, P_total) — a no-op slice when rectangular.
-            view_bias = full_bias[i, 0, :L_down_list[i]]
-            _apply_stream_bias(
-                view_bias, masks_down[i],
-                self.patch_start, self.patch_end,
-                self._enable_cropped_image,
-            )
-            if masks_down_full:
-                _apply_stream_bias(
-                    view_bias, masks_down_full[i],
-                    self.full_patch_start, self.full_patch_end,
-                    self._enable_full_image,
-                )
-            _apply_stream_bias(
-                view_bias, masks_down[i],
-                CROPPED_MASK_PATCH_START, CROPPED_MASK_PATCH_END,
-                self._enable_cropped_mask,
-            )
-            if masks_down_full:
-                _apply_stream_bias(
-                    view_bias, masks_down_full[i],
-                    FULL_MASK_PATCH_START, FULL_MASK_PATCH_END,
-                    self._enable_full_mask,
-                )
-
-        # Passive-stream compensation (Approach A — `-c` on active).
-        # When only a subset of streams gets the +alpha bias, the global
-        # softmax's partition function shifts and un-biased ("passive")
-        # streams' aggregate share drops.  Approach A subtracts a per-voxel
-        # scalar c_i = logsumexp(bias_active_i) - log(|patches_active|)
-        # from every active-stream patch token (Z' = exp(-c) * Z_alpha;
-        # under uniform-`s`, |active| · exp(-c) · (v·exp(α)+(1-v)) = |active|
-        # so Z'_total = Z_baseline exactly).  Both passive AND global (CLS)
-        # tokens preserve their aggregate post-softmax share; the
-        # within-active visible:invisible ratio remains exp(α):1.
-        stream_layout = [
-            (self.patch_start, self.patch_end, self._enable_cropped_image),
-            (self.full_patch_start, self.full_patch_end,
-             self._enable_full_image and bool(masks_down_full)),
-            (CROPPED_MASK_PATCH_START, CROPPED_MASK_PATCH_END,
-             self._enable_cropped_mask),
-            (FULL_MASK_PATCH_START, FULL_MASK_PATCH_END,
-             self._enable_full_mask and bool(masks_down_full)),
-        ]
-        # Streams entirely outside the actual context (P_total) are
-        # neither active nor passive — exclude them.
-        in_range = [(s, e, en) for s, e, en in stream_layout if e <= P_total]
-        self._active_ranges = [(s, e) for s, e, en in in_range if en]
-        self._passive_ranges = [(s, e) for s, e, en in in_range if not en]
-
-        if (self._compensate_passive_streams == "approx"
-                and self._active_ranges and self._passive_ranges):
-            for n_view in range(N):
-                view_bias = full_bias[n_view, 0, :L_down_list[n_view]]
-                active_concat = torch.cat(
-                    [view_bias[:, s:e] for s, e in self._active_ranges], dim=1
-                )
-                c_i = (torch.logsumexp(active_concat, dim=1)
-                       - math.log(active_concat.shape[1]))
-                for s, e in self._active_ranges:
-                    view_bias[:, s:e] = view_bias[:, s:e] - c_i.unsqueeze(-1)
-
-        return full_bias
 
     def set_active(self, active: bool) -> None:
         """Enable/disable the bias.  Use to skip unconditional CFG passes."""
@@ -753,8 +912,6 @@ class SparseVisibilityBiasHook:
                 st = self._shared_state
                 self._masks_downsampled = st.get("masks_down")
                 self._masks_downsampled_full = st.get("masks_down_full")
-                self._active_ranges = st.get("active_ranges")
-                self._passive_ranges = st.get("passive_ranges")
                 self._L_down_list = st.get("L_down_list")
             else:
                 self._bias = self._build_bias(query_sparse, context)
@@ -762,8 +919,6 @@ class SparseVisibilityBiasHook:
                     self._shared_state["bias"] = self._bias
                     self._shared_state["masks_down"] = self._masks_downsampled
                     self._shared_state["masks_down_full"] = self._masks_downsampled_full
-                    self._shared_state["active_ranges"] = self._active_ranges
-                    self._shared_state["passive_ranges"] = self._passive_ranges
                     self._shared_state["L_down_list"] = self._L_down_list
             # Capture coords for debug viz (batch 0, xyz only).  layout[0]
             # is view 0's rows: slice(0, L_down) when rectangular, and the
@@ -778,7 +933,7 @@ class SparseVisibilityBiasHook:
             self._capture_debug_attention(module, query_sparse, context)
 
         kwargs = dict(kwargs)  # don't mutate the original
-        kwargs["attn_bias"] = self._bias.to(query_sparse.device)
+        kwargs["attn_bias"] = self._bias  # built on the query's device
         return args, kwargs
 
     def _capture_debug_attention(self, module, query_sparse, context):
@@ -811,10 +966,10 @@ class SparseVisibilityBiasHook:
                 scores.float(), dim=-1,
             ).detach().cpu()
 
-            # bias is (N, 1, L_down, P_total) — stacked per-view storage
+            dense = self._bias.to_dense()  # (N, 1, L_down, P_total)
             biased_scores = scores.clone()
             for i in range(N):
-                biased_scores[i] += self._bias[i, 0].to(scores.dtype)
+                biased_scores[i] += dense[i, 0].to(scores.dtype)
             self._debug_attn_after = F.softmax(
                 biased_scores.float(), dim=-1,
             ).detach().cpu()
@@ -840,8 +995,9 @@ class SparseVisibilityBiasHook:
         """Return per-view ``(L_down, P_patches)`` full-image-stream masks."""
         return self._masks_downsampled_full
 
-    def get_bias(self) -> Optional[torch.Tensor]:
-        """Return the ``(N, 1, L_down, P_total)`` per-view stacked bias tensor (None before first call)."""
+    def get_bias(self) -> Optional[FootprintBias]:
+        """Return the :class:`FootprintBias` (None before first call); ``.to_dense()`` gives
+        the ``(N, 1, L_down, P_total)`` per-view stacked tensor."""
         return self._bias
 
     def get_coords(self) -> Optional[torch.Tensor]:

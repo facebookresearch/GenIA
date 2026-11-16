@@ -543,7 +543,12 @@ def compute_total_loss(
                 gt_d = frame_data["gt_depth"]  # numpy (H, W)
                 frame_px["gt_depth"] = gt_d
                 gt_d_t = torch.from_numpy(gt_d).float().to(device)
-                frame_px["gt_normals"] = _d2n(gt_d_t, _K).cpu().numpy()
+                # _K is the render's (native under native_supervision); GT depth
+                # is on the backend's grid, same field of view.
+                _K_gt = _K.clone()
+                _K_gt[0] *= gt_d.shape[1] / gt_image.shape[1]
+                _K_gt[1] *= gt_d.shape[0] / gt_image.shape[0]
+                frame_px["gt_normals"] = _d2n(gt_d_t, _K_gt).cpu().numpy()
 
             for k, v in losses_dict.items():
                 if k.startswith("px_"):

@@ -47,8 +47,8 @@ rendering_guidance_active: true
 rendering_guidance_velocity_weight: 1.0
 rendering_guidance_active_from: 0.0
 rendering_guidance_active_until: 1.0
-# Frames per render/backward chunk (0 = all at once).  Gradient-identical;
-# only peak activation memory changes.
+# Frames per render/backward chunk (0 = all at once).  Gradient-identical; the
+# decoder runs once per step either way, so only peak activation memory changes.
 rendering_guidance_microbatch_size: 1
 # Integer downscale of GT + intrinsics for the guidance loss (1 = native).
 rendering_guidance_resolution_scale: 1

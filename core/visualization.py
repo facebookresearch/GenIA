@@ -142,6 +142,10 @@ def _mask_to_rgb(mask: np.ndarray) -> np.ndarray:
     return np.stack([m, m, m], axis=-1)
 
 
+#: Longest side of the backgrounds the attention-bias panels are drawn from.
+ATTN_PANEL_MAX_SIDE = 512
+
+
 def _prepare_stream_backgrounds(
     image: np.ndarray,
     mask: np.ndarray,
@@ -1820,9 +1824,12 @@ def plot_attn_bias_debug(
     NUM_P = 1369  # 37 * 37
     GRID = 37
 
-    # Reference image size
+    # Reference image size, and the panels' (~2.5 in each): drawn from backgrounds at most
+    # ATTN_PANEL_MAX_SIDE px, so the plot's cost does not grow with the input resolution.
     _ref_img = input_images[0] if input_images else np.zeros((256, 256, 3), dtype=np.uint8)
     _H, _W = _ref_img.shape[:2]
+    _s = min(1.0, ATTN_PANEL_MAX_SIDE / max(_H, _W))
+    _PH, _PW = max(1, round(_H * _s)), max(1, round(_W * _s))
     view_idx = 0
 
     # Select view-specific masks for visualization
@@ -1868,7 +1875,7 @@ def plot_attn_bias_debug(
 
     _bg_map = _prepare_stream_backgrounds(
         img_raw, _obj_mask if _obj_mask is not None else np.ones((_H, _W), dtype=bool),
-        _H, _W,
+        _PH, _PW,
     )
     # Map Stage 2 stream names to background keys
     _stream_to_bg = {
@@ -1957,13 +1964,13 @@ def plot_attn_bias_debug(
             col_base = 1 + si * 3
 
             bg_key = _stream_to_bg.get(sname, "full_image")
-            bg = _bg_map.get(bg_key, np.full((_H, _W, 3), 128, dtype=np.uint8))
+            bg = _bg_map.get(bg_key, np.full((_PH, _PW, 3), 128, dtype=np.uint8))
 
             # Geometric mask: green overlay on stream background
             ax = axes[row, col_base]
             if smask is not None:
                 mask_37 = smask[vid].reshape(GRID, GRID).astype(np.float32)
-                mask_up = ndimage_zoom(mask_37, (_H / GRID, _W / GRID), order=0)
+                mask_up = ndimage_zoom(mask_37, (_PH / GRID, _PW / GRID), order=0)
                 bg_f = bg.astype(np.float32) / 255.0
                 green = np.array([0, 1, 0])
                 overlay = np.where(

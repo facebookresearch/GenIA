@@ -63,8 +63,9 @@ def extract_canonical_shape_latent(obj_idx, canon_frame_per_object, sequence,
     canon_frame = sequence[canon_fid]
     canon_pm = transform_to_pytorch3d_convention(canon_frame.pointmap)
     canon_pm_tensor = torch.from_numpy(canon_pm).float().cuda()
+    cond_image, cond_masks, _ = sequence.conditioning_source(canon_fid)
     canon_result = inference(
-        canon_frame.image, canon_frame.masks[obj_idx],
+        cond_image, cond_masks[obj_idx],
         seed=seed, pointmap=canon_pm_tensor,
         stage1_only=True,
     )
@@ -137,9 +138,15 @@ def run_parallel_shape_and_poses_init(obj_idx, tokens_by_object, canon_frame_per
             print(f"    Frame {fid}: no mask, skipping")
             continue
         pm = transform_to_pytorch3d_convention(frame.pointmap)
+        cond_image, cond_masks, _ = sequence.conditioning_source(fid)
         frames_data.append({
             "image": frame.image,
             "mask": mask,
+            # What SAM3D is conditioned on (native pixels under
+            # processing.native_conditioning); image/mask stay the frame's for the
+            # visibility hooks, which project into the frame's pixels.
+            "cond_image": cond_image,
+            "cond_mask": cond_masks[obj_idx],
             "pointmap": torch.from_numpy(pm).float().cuda(),
         })
         valid_fids.append(fid)

@@ -17,7 +17,9 @@ Functions
 - ``shape_tokens_to_latent`` : ``(1, 4096, 8)`` → latent
 """
 
+import contextlib
 import logging
+import types
 from typing import List, Optional, Tuple
 
 import numpy as np
@@ -145,6 +147,38 @@ def resolve_autocast_dtype(name: str):
             f"{sorted(_AUTOCAST_DTYPES)}"
         )
     return _AUTOCAST_DTYPES[name]
+
+
+@contextlib.contextmanager
+def _channels_last(decoder: torch.nn.Module):
+    """Run ``decoder`` (the SAM3D ``ss_decoder``) channels-last.
+
+    Its weights go to ``channels_last_3d`` and each ``ChannelLayerNorm32`` returns a
+    channels-last view instead of copying back to NCDHW, so the convs read the layout
+    cuDNN computes in rather than converting on every call.  Same kernels on the same
+    values: bit-identical for ONE sample (logits, gradients and the latent after 100
+    Adam steps), ~20% faster per inversion step.  Not for a batch, where
+    cuDNN picks other kernels.
+    """
+    from sam3d_objects.model.backbone.tdfy_dit.modules.norm import (
+        ChannelLayerNorm32, LayerNorm32,
+    )
+
+    def forward(self, x):
+        d = x.dim()
+        return LayerNorm32.forward(
+            self, x.permute(0, *range(2, d), 1)).permute(0, d - 1, *range(1, d - 1))
+
+    norms = [m for m in decoder.modules() if isinstance(m, ChannelLayerNorm32)]
+    decoder.to(memory_format=torch.channels_last_3d)
+    for m in norms:
+        m.forward = types.MethodType(forward, m)
+    try:
+        yield
+    finally:
+        for m in norms:
+            del m.forward
+        decoder.to(memory_format=torch.contiguous_format)
 
 
 def invert_decoder(
@@ -362,14 +396,18 @@ def occupancies_to_shape_tokens(
     a = 0
     while a < B:
         occ_c = occupancy[a:a + cs]
+        # One sample: decoder channels-last, faster and bit-identical (_channels_last).
+        layout = (_channels_last(decoder) if occ_c.shape[0] == 1 and occ_c.is_cuda
+                  else contextlib.nullcontext())
         try:
-            z_c, _ = invert_decoder(
-                decoder, occ_c, num_steps=num_steps, lr=lr,
-                prior_weight=prior_weight, prior_target_var=prior_target_var,
-                l2_weight=l2_weight,
-                show_progress=show_progress, autocast_dtype=autocast_dtype,
-                progress_desc=f"Shape inversion [{a}:{a + occ_c.shape[0]}/{B}]",
-            )
+            with layout:
+                z_c, _ = invert_decoder(
+                    decoder, occ_c, num_steps=num_steps, lr=lr,
+                    prior_weight=prior_weight, prior_target_var=prior_target_var,
+                    l2_weight=l2_weight,
+                    show_progress=show_progress, autocast_dtype=autocast_dtype,
+                    progress_desc=f"Shape inversion [{a}:{a + occ_c.shape[0]}/{B}]",
+                )
         except torch.cuda.OutOfMemoryError:
             if cs == 1:
                 raise

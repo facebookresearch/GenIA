@@ -1,0 +1,14 @@
+# Depth + cameras reconstructed by another tool and handed over as a file, read in place
+# of a map-anything forward. Set processing.precomputed_geometry to that file
+# (recon_cache format) and processing.precomputed_model to the backend that made it.
+
+defaults:
+  - default
+  - _self_
+
+reconstruction_model: precomputed
+depth_source: pred
+camera_poses_source: pred         # the producer's predicted poses
+median_intrinsics: false
+precomputed_geometry: ???
+precomputed_model: ???

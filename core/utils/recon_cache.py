@@ -191,4 +191,4 @@ __all__ = ["ReconResult", "CACHE_VERSION", "cache_key", "run_cached"]
 
 
 #: Datasets whose true intrinsics ``Sequence`` feeds map-anything as conditioning.
-GT_K_DATASETS = ("gso", "co3d", "oursactionbench")
+GT_K_DATASETS = ("gso", "co3d", "oursactionbench", "mvsynth")

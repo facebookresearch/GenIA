@@ -138,8 +138,14 @@ def _prepare_frame_targets(
     frames: list,
     device: torch.device,
     resolution_scale: int = 1,
+    sdt: bool = True,
 ) -> List[dict]:
     """Build per-frame GT targets for rendering guidance.
+
+    The targets are the frame's ``render_image`` / ``render_mask`` / ``render_K`` when
+    set (native pixels, ``Sequence.render_source``), else ``image`` / ``mask`` /
+    ``K_matrix``; depth stays on its own (backend) grid, which the depth terms
+    match the render to (``_match_depth_grid``).
 
     ``resolution_scale > 1`` divides each frame's H, W by that factor
     (nearest for masks/depth, area for RGB) and scales the intrinsics
@@ -149,7 +155,7 @@ def _prepare_frame_targets(
     rs = max(1, int(resolution_scale))
     out = []
     for f in frames:
-        m = f["mask"]
+        m = f.get("render_mask", f["mask"])
         if isinstance(m, np.ndarray):
             m = torch.from_numpy(m).float()
         m = m.float().to(device)
@@ -158,7 +164,7 @@ def _prepare_frame_targets(
             if isinstance(d, np.ndarray):
                 d = torch.from_numpy(d).float()
             d = d.float().to(device)
-        img = f.get("image")
+        img = f.get("render_image", f.get("image"))
         img_t = None
         if img is not None:
             if isinstance(img, np.ndarray):
@@ -176,9 +182,10 @@ def _prepare_frame_targets(
             m = torch.nn.functional.interpolate(
                 m[None, None], size=(H, W), mode="nearest"
             )[0, 0]
-            if d is not None:
+            if d is not None:   # its own grid, which the render may exceed
                 d = torch.nn.functional.interpolate(
-                    d[None, None], size=(H, W), mode="nearest"
+                    d[None, None], mode="nearest",
+                    size=(max(1, d.shape[0] // rs), max(1, d.shape[1] // rs)),
                 )[0, 0]
             # rgb: area downsample (anti-alias).  Channel-first for interp,
             # restore the original layout (assumed H,W,3 or H,W,4).
@@ -197,7 +204,7 @@ def _prepare_frame_targets(
 
         m_bool = m > 0.5
 
-        K = f.get("K_matrix")
+        K = f.get("render_K", f.get("K_matrix"))
         if K is not None and rs > 1:
             K_arr = K.detach().cpu().numpy() if isinstance(K, torch.Tensor) else np.asarray(K)
             K_arr = K_arr.copy()
@@ -213,7 +220,9 @@ def _prepare_frame_targets(
 
         out.append({
             "mask": m_bool,
-            "sdt": _compute_signed_distance_transform(m_bool),
+            # the mask's signed distance (a CPU scipy pass), only when the
+            # silhouette-SDT loss reads it; None otherwise, which the loss accepts
+            "sdt": _compute_signed_distance_transform(m_bool) if sdt else None,
             "K": K,
             "depth_z": d,
             "image_rgb": img_t,
@@ -238,26 +247,32 @@ def _prepare_frame_targets(
 # so loss-weight tuning happens via the standard ``LossConfig``.
 
 
+def _thumb_np(t, max_hw: int = 256):
+    """An ``(H, W, ...)`` image tensor as a numpy thumbnail for diagnostic PNGs:
+    stride-downsampled so per-step storage and plotting stay bounded regardless of render
+    resolution (the viz cells are ~240px anyway)."""
+    t = t.detach()
+    s = max(1, max(t.shape[0], t.shape[1]) // max_hw)
+    if s > 1:
+        t = t[::s, ::s]
+    return t.cpu().numpy()
+
+
 def _rgb_err_map(rendered_rgb, gt_rgb, mask):
     """Per-pixel mean-abs RGB error masked to the object (for diagnostic PNGs).
 
     ``rendered_rgb`` / ``gt_rgb`` are ``(H, W, 3)`` in [0, 1]; the error is
     averaged over channels and zeroed outside the object mask (so the random
-    background never shows up).  Returns an ``(H, W)`` numpy array.
+    background never shows up).  Returns an ``(H, W)`` numpy thumbnail
+    (:func:`_thumb_np`).
     """
     err = (rendered_rgb.detach() - gt_rgb).abs().mean(dim=-1)
-    return (err * mask.float()).cpu().numpy()
+    return _thumb_np(err * mask.float())
 
 
 def _rgb_to_np(rgb, max_hw: int = 256):
-    """``(H, W, 3)`` rendered/GT RGB in [0, 1] → numpy thumbnail for diagnostic
-    PNGs.  Stride-downsampled so the per-step storage stays bounded regardless
-    of render resolution (the viz cells are ~240px anyway)."""
-    t = rgb.detach().clamp(0.0, 1.0)
-    s = max(1, max(t.shape[0], t.shape[1]) // max_hw)
-    if s > 1:
-        t = t[::s, ::s]
-    return t.cpu().numpy()
+    """``(H, W, 3)`` rendered/GT RGB in [0, 1] → numpy thumbnail (:func:`_thumb_np`)."""
+    return _thumb_np(rgb.clamp(0.0, 1.0), max_hw)
 
 
 def _gt_on_bg_np(gt_rgb, mask, bg_color, max_hw: int = 256):
@@ -361,14 +376,14 @@ def build_appearance_rendering_guidance_transform(
     )
     from genia.core.utils.slat_decode import _GAUSSIAN_FP_ATTRS, _cast_attrs_float32
     from genia.core.finetuning import (
-        _detach_invisible_gaussians,
         _flag_visible_by_depth,
         _sample_random_bg_color,
     )
     from genia.core.utils.rendering import render_gaussian_params
 
     frame_targets = _prepare_frame_targets(
-        frames, device, resolution_scale=resolution_scale
+        frames, device, resolution_scale=resolution_scale,
+        sdt=losses_cfg.silhouette_sdt_weight > 0,
     )
     # Normalize intrinsics to numpy once — the per-frame loops below otherwise
     # re-convert (device→host sync) every frame at every ODE step.
@@ -521,98 +536,106 @@ def build_appearance_rendering_guidance_transform(
             frame_rendered_g: list = [None] * n_frames
             frame_gt_rgb: list = [None] * n_frames
 
-            # Microbatch the per-frame render loop.  ``mb >= n_frames`` (or 0)
-            # falls through to single-pass.  Decoder + un-norm run per
-            # chunk so the chunk's graph fully releases after
-            # ``autograd.grad`` — bounds peak memory at one chunk's
-            # decoder+render activations instead of holding the decoder
-            # graph alive across chunks via ``retain_graph``.
+            # Decode ONCE per step, render + backprop the frames in chunks of
+            # ``mb`` (0 = all at once) into LEAF copies of the decoded Gaussian
+            # attributes, then send their summed gradient through the decoder in
+            # one backward.  Gradient-identical to one graph over every frame
+            # (chain rule) at one decoder forward + backward per step; each
+            # chunk's render + loss graph is freed by its ``autograd.grad``, so
+            # peak memory is the decoder graph plus ONE chunk's renders + losses.
             mb = max(1, min(int(microbatch_size) if microbatch_size > 0 else n_frames, n_frames))
             chunks = list(range(0, n_frames, mb))
 
-            acc_grad = (
-                torch.zeros_like(x1) if not monitor_only else None
-            )
             total_loss_val = 0.0
             L_g_total_val = 0.0
+
+            feats = x1[0] * slat_std_d + slat_mean_d  # (L, 8)
+            slat = sp.SparseTensor(coords=canonical_coords, feats=feats)
+            # bf16 decoder forward (activations stored in bf16 for the
+            # backward), outputs cast back to fp32 below so the gsplat render +
+            # loss stay full-precision.
+            with torch.autocast("cuda", dtype=torch.bfloat16,
+                                enabled=decoder_autocast_bf16):
+                gs_list = gs_decoder(slat)
+            gs_obj = gs_list[0] if isinstance(gs_list, list) else gs_list
+            if gs_obj is not None and decoder_autocast_bf16:
+                _cast_attrs_float32(gs_obj, _GAUSSIAN_FP_ATTRS)
+            if gs_obj is None or gs_obj.get_xyz.shape[0] == 0:
+                loss_history.append({
+                    "t": t,
+                    "total": 0.0,
+                    "gaussian": 0.0,
+                    "n_g": 0,
+                    "skip_reason": "empty_decode",
+                })
+                return v_fused
+
             # Per-step occlusion mask (visibility_detach): (n_gauss,) bool,
-            # True = occluded in EVERY frame → stop-gradient'd below.  The
-            # decode is deterministic in x1, so the chunk-0 mask holds for
-            # every chunk of this step.
+            # True = occluded in EVERY frame → stop-gradient'd below.
             invisible_gauss = None
             n_occluded = 0
+            # The renders read leaf copies; ``decoded`` keeps the decoder-graph
+            # tensors for the one backward after the chunk loop.
+            decoded, leaves, leaf_grads = [], [], []
+            if not monitor_only:
+                for a in _GAUSSIAN_FP_ATTRS:
+                    attr = getattr(gs_obj, a, None)
+                    if torch.is_tensor(attr) and attr.requires_grad:
+                        leaf = attr.detach().requires_grad_()
+                        setattr(gs_obj, a, leaf)
+                        decoded.append(attr)
+                        leaves.append(leaf)
+                        leaf_grads.append(torch.zeros_like(leaf))
 
-            for ci, chunk_start in enumerate(chunks):
-                chunk_end = min(chunk_start + mb, n_frames)
-
-                # Un-norm must stay inside the loop so its edge to ``x1``
-                # is chunk-local — otherwise chunk 1+ backward hits a
-                # freed graph edge.
-                feats = x1[0] * slat_std_d + slat_mean_d  # (L, 8)
-                slat = sp.SparseTensor(coords=canonical_coords, feats=feats)
-                # bf16 decoder forward (activations stored in bf16 for the
-                # chunk backward), outputs cast back to fp32 below so the
-                # gsplat render + loss stay full-precision.
-                with torch.autocast("cuda", dtype=torch.bfloat16,
-                                    enabled=decoder_autocast_bf16):
-                    gs_list = gs_decoder(slat)
-                gs_obj = gs_list[0] if isinstance(gs_list, list) else gs_list
-                if gs_obj is not None and decoder_autocast_bf16:
-                    _cast_attrs_float32(gs_obj, _GAUSSIAN_FP_ATTRS)
-                if gs_obj is None or gs_obj.get_xyz.shape[0] == 0:
-                    gs_obj = None
-
-                # SLAT is constant within a step → chunk 0 alone decides
-                # whether the decode is empty for the whole step.
-                if ci == 0 and gs_obj is None:
-                    loss_history.append({
-                        "t": t,
-                        "total": 0.0,
-                        "gaussian": 0.0,
-                        "n_g": 0,
-                        "skip_reason": "empty_decode",
-                    })
-                    return v_fused
-
-                # Visibility pass (FINETUNE parity): render each frame once
-                # without grad, flag Gaussians whose projected centre sits
-                # behind the rendered surface, OR over frames.  Forward-only —
-                # loss values are unchanged, only gradients are masked.
-                if ci == 0 and visibility_detach and not monitor_only:
+            # Visibility pass (FINETUNE parity): render each frame once
+            # without grad, flag Gaussians whose projected centre sits
+            # behind the rendered surface, OR over frames.  Forward-only —
+            # loss values are unchanged, only gradients are masked.  Each
+            # frame's camera-space params are built with grad (from the
+            # leaves) and reused by its loss render below: computed once,
+            # and only these per-Gaussian tensors stay alive meanwhile.
+            cam_params: list = [None] * n_frames
+            if visibility_detach and not monitor_only:
+                vis_any = None
+                for vi, vfd in enumerate(frame_targets):
+                    K_v = vfd["K"]
+                    if K_v is None:
+                        continue
+                    cam_params[vi] = _gauss_cam_params_r3(
+                        gs_obj, vi,
+                        quat_all[vi], trans_all[vi], scale_all[vi],
+                    )
                     with torch.no_grad():
-                        vis_any = None
-                        for vi, vfd in enumerate(frame_targets):
-                            K_v = vfd["K"]
-                            if K_v is None:
-                                continue
-                            params_v = _gauss_cam_params_r3(
-                                gs_obj, vi,
-                                quat_all[vi], trans_all[vi], scale_all[vi],
-                            )
-                            _, alpha_v, depth_v = render_gaussian_params(
-                                *params_v, _eye_c2w, K_v, vfd["W"], vfd["H"],
-                            )
-                            vis_v = _flag_visible_by_depth(
-                                params_v[0], alpha_v, depth_v, K_v,
-                                vfd["W"], vfd["H"], visibility_depth_margin,
-                            )
-                            vis_any = vis_v if vis_any is None else (vis_any | vis_v)
-                        if vis_any is not None:
-                            invisible_gauss = ~vis_any
-                            n_occluded = int(invisible_gauss.sum())
-                            if not _vis_logged:
-                                _vis_logged.append(True)
-                                print(
-                                    f"    rg visibility_detach: {n_occluded}/"
-                                    f"{invisible_gauss.numel()} Gaussians occluded "
-                                    f"in every frame → stop-gradient'd"
-                                )
+                        _, alpha_v, depth_v = render_gaussian_params(
+                            *cam_params[vi], _eye_c2w, K_v, vfd["W"], vfd["H"],
+                        )
+                        vis_v = _flag_visible_by_depth(
+                            cam_params[vi][0], alpha_v, depth_v, K_v,
+                            vfd["W"], vfd["H"], visibility_depth_margin,
+                        )
+                    vis_any = vis_v if vis_any is None else (vis_any | vis_v)
+                if vis_any is not None:
+                    invisible_gauss = ~vis_any
+                    n_occluded = int(invisible_gauss.sum())
+                    if not _vis_logged:
+                        _vis_logged.append(True)
+                        print(
+                            f"    rg visibility_detach: {n_occluded}/"
+                            f"{invisible_gauss.numel()} Gaussians occluded "
+                            f"in every frame → stop-gradient'd"
+                        )
 
-                # Stop-gradient the occluded rows' decoded attributes in place
-                # (shared FINETUNE recipe) before this chunk's renders, so
-                # backward sends no gradient through them to x1.
-                if invisible_gauss is not None:
-                    _detach_invisible_gaussians(gs_obj, invisible_gauss)
+            # Stop-gradient the occluded rows of the decoded attributes the
+            # backward reads (the shared FINETUNE recipe,
+            # ``_detach_invisible_gaussians``, applied to ``decoded``), so it
+            # sends no gradient through them to x1 or the decoder.
+            if invisible_gauss is not None:
+                for j, attr in enumerate(decoded):
+                    m = invisible_gauss.view(-1, *([1] * (attr.dim() - 1)))
+                    decoded[j] = torch.where(m, attr.detach(), attr)
+
+            for chunk_start in chunks:
+                chunk_end = min(chunk_start + mb, n_frames)
 
                 L_g_partial = torch.tensor(0.0, device=device, dtype=torch.float32)
 
@@ -649,47 +672,48 @@ def build_appearance_rendering_guidance_transform(
                     # Gaussian branch — posed (and, with the per-vertex
                     # deformation field, warped) camera-space params via
                     # ``_gauss_cam_params_r3``, rendered with identity c2w.
-                    if gs_obj is not None:
-                        rgb_g, alpha_g, depth_g = render_gaussian_params(
-                            *_gauss_cam_params_r3(gs_obj, i, quat_i, trans_i, scale_i),
-                            _eye_c2w, K_np, W_i, H_i, bg_color=bg_i,
+                    params_i = cam_params[i] or _gauss_cam_params_r3(
+                        gs_obj, i, quat_i, trans_i, scale_i)
+                    cam_params[i] = None  # released with this chunk's graph
+                    rgb_g, alpha_g, depth_g = render_gaussian_params(
+                        *params_i, _eye_c2w, K_np, W_i, H_i, bg_color=bg_i,
+                    )
+                    losses_g = _compute_frame_loss(
+                        rgb_g, alpha_g, fd["image_rgb"], fd["mask"],
+                        losses=losses_cfg,
+                        sdt=fd["sdt"],
+                        rendered_depth=depth_g,
+                        gt_depth=fd["depth_z"],
+                        bg_color=bg_i,
+                        has_background=False,
+                    )
+                    _drop_g = []
+                    _Lg_i = _aggregate_frame_loss(
+                        losses_g, losses_cfg, report=_drop_g)
+                    _warn_non_finite_loss(
+                        _Lg_i, losses_g, "gaussian", i, float(t),
+                        rgb_g, alpha_g, gt=fd["image_rgb"], mask=fd["mask"],
+                        frame_label=(frame_labels[i] if frame_labels
+                                     else None),
+                        dropped=_drop_g,
+                    )
+                    L_g_partial = L_g_partial + _Lg_i
+                    if want_depth_err and fd["depth_z"] is not None:
+                        # depth_g/fd["mask"] may be render-resolution;
+                        # fd["depth_z"] never exceeds the backbone's res.
+                        _depth_g_d, _, _mask_g_d = _match_depth_grid(
+                            depth_g, fd["depth_z"].shape[-2:], mask=fd["mask"])
+                        _, derr_g = _depth_l1_term(
+                            _depth_g_d, fd["depth_z"], _mask_g_d,
+                            mask_only=bool(losses_cfg.depth_mask_only),
+                            return_error_map=True,
                         )
-                        losses_g = _compute_frame_loss(
-                            rgb_g, alpha_g, fd["image_rgb"], fd["mask"],
-                            losses=losses_cfg,
-                            sdt=fd["sdt"],
-                            rendered_depth=depth_g,
-                            gt_depth=fd["depth_z"],
-                            bg_color=bg_i,
-                            has_background=False,
+                        frame_depth_errors_g[i] = _thumb_np(derr_g)
+                    if want_rgb_err and fd["image_rgb"] is not None:
+                        frame_rgb_errors_g[i] = _rgb_err_map(
+                            rgb_g, fd["image_rgb"], fd["mask"]
                         )
-                        _drop_g = []
-                        _Lg_i = _aggregate_frame_loss(
-                            losses_g, losses_cfg, report=_drop_g)
-                        _warn_non_finite_loss(
-                            _Lg_i, losses_g, "gaussian", i, float(t),
-                            rgb_g, alpha_g, gt=fd["image_rgb"], mask=fd["mask"],
-                            frame_label=(frame_labels[i] if frame_labels
-                                         else None),
-                            dropped=_drop_g,
-                        )
-                        L_g_partial = L_g_partial + _Lg_i
-                        if want_depth_err and fd["depth_z"] is not None:
-                            # depth_g/fd["mask"] may be render-resolution;
-                            # fd["depth_z"] never exceeds the backbone's res.
-                            _depth_g_d, _, _mask_g_d = _match_depth_grid(
-                                depth_g, fd["depth_z"].shape[-2:], mask=fd["mask"])
-                            _, derr_g = _depth_l1_term(
-                                _depth_g_d, fd["depth_z"], _mask_g_d,
-                                mask_only=bool(losses_cfg.depth_mask_only),
-                                return_error_map=True,
-                            )
-                            frame_depth_errors_g[i] = derr_g.detach().cpu().numpy()
-                        if want_rgb_err and fd["image_rgb"] is not None:
-                            frame_rgb_errors_g[i] = _rgb_err_map(
-                                rgb_g, fd["image_rgb"], fd["mask"]
-                            )
-                            frame_rendered_g[i] = _rgb_to_np(rgb_g)
+                        frame_rendered_g[i] = _rgb_to_np(rgb_g)
 
                 # Match single-pass: divide by the total frame count up front,
                 # so summing chunk_loss across chunks equals the frame mean.
@@ -700,8 +724,14 @@ def build_appearance_rendering_guidance_transform(
                 total_loss_val += chunk_loss.item()
 
                 if not monitor_only and chunk_loss.item() >= 1e-10:
-                    g = torch.autograd.grad(chunk_loss, x1)[0]
-                    acc_grad = acc_grad + g
+                    grads = torch.autograd.grad(chunk_loss, leaves, allow_unused=True)
+                    for acc, g in zip(leaf_grads, grads):
+                        if g is not None:
+                            acc += g
+
+            acc_grad = None
+            if not monitor_only and total_loss_val >= 1e-10:
+                acc_grad = torch.autograd.grad(decoded, x1, grad_outputs=leaf_grads)[0]
 
             L_g_avg = L_g_total_val / n_g_total if n_g_total > 0 else 0.0
 

@@ -1069,6 +1069,11 @@ def icp_frame_observation(sequence, obj_idx: int, fk, device, max_gt_points,
     data = _prepare_frame_data_for_refinement(sequence, fk, obj_idx)
     if data is None or data.get("gt_depth") is None:
         return None
+    # ICP is geometry: everything on the depth's own grid, not the photometric targets'
+    # (native pixels under processing.native_supervision).
+    frame = sequence[fk]
+    data = {**data, "mask": frame.masks[obj_idx], "K_matrix": frame.K_matrix,
+            "H": data["gt_depth"].shape[0], "W": data["gt_depth"].shape[1]}
     # Seeded on (object, frame, view) so the target is REPRODUCIBLE across runs while
     # still differing between frames.  Unseeded, two runs of one ICP config would optimise
     # against different point draws.
