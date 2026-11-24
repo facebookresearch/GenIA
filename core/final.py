@@ -171,8 +171,8 @@ def _anchor_mesh_visibility(
                     float(K[1, 2]), int(H), int(W))
                 D = _np(depth).squeeze()                  # (H, W) camera z-depth
                 A = _np(alpha).squeeze() > 0.5
-                u = np.round(uv[oi][t, :, 0]).astype(int)
-                w = np.round(uv[oi][t, :, 1]).astype(int)
+                u = np.floor(uv[oi][t, :, 0]).astype(int)   # the pixel it falls in
+                w = np.floor(uv[oi][t, :, 1]).astype(int)
                 inb = (u >= 0) & (u < W) & (w >= 0) & (w < H)
                 uc, wc = np.clip(u, 0, W - 1), np.clip(w, 0, H - 1)
                 zc = ac[:, 2]

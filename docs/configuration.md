@@ -24,7 +24,9 @@ Further flags:
 
 | Flag | Settings | Effect |
 |---|---|---|
-| `--scene <name>` | all | a scene folder under `demo/data/<setting>/` |
+| `--scene <name>` | all | a scene folder under `<data-root>/<setting>/` |
+| `--data-root <dir>` | all | the directory holding `<setting>/<scene>/`, laid out like `demo/data/` (default: `demo/data`), so your own scenes need not live in the checkout |
+| `--low-vram` / `--no-low-vram` | all | gradient-checkpoints FINETUNE's decoder on every object, not only those from 30k voxels (`++finetuning.decoder_checkpoint_min_voxels=0`), and sets `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`: the image and multi-view demos then peak at ~16 GB instead of running out of memory on a 24 GB GPU, at about twice FINETUNE's time (sloth 221 s, pablo 521 s on an RTX 4090). Default: on when the GPU has less than 44 GiB free (asked in a short-lived child process, so `run_demo.py` holds no CUDA context during the run) |
 | `--icp` | `image`, `multiview` | keeps the pipeline's ICP pose refinement. By default the static demos add a per-frame appearance pass before the first pose refinement and make that refinement render-based with the RGB terms at a tenth of their weight (`appearance_init=perframe`, `global_pose_refine@global_pose_refine_1=low_rgb`) |
 | `--no-minimal-outputs` | all | also writes every block's renders, videos and metrics. By default the demo sets `output.suppress_intermediate_renders=true` and `output.suppress_intermediate_metrics=true`, so only `final/` and `preprocessing/colmap/` are written |
 | `--per-frame-shapes` | `dynamic` | uses SAM 3D Objects' independent per-frame shapes instead of ActionMesh's. No canonical object is built, so the run writes per-frame outputs without tracks or interpolation |

@@ -593,6 +593,10 @@ _VOXEL_CUBE_F = np.array([  # 12 triangles (2 per face, CCW from outside)
     [0, 1, 5], [0, 5, 4], [2, 3, 7], [2, 7, 6],
     [0, 4, 7], [0, 7, 3], [1, 2, 6], [1, 6, 5],
 ], dtype=np.int64)
+#: The neighbour each pair of ``_VOXEL_CUBE_F`` triangles faces: -z, +z, -y, +y, -x, +x.
+_VOXEL_CUBE_SIDES = np.array([
+    [0, 0, -1], [0, 0, 1], [0, -1, 0], [0, 1, 0], [-1, 0, 0], [1, 0, 0],
+], dtype=np.int64)
 
 
 # Axis-gizmo overlay for the voxel-mesh composite.  Local +X/+Y/+Z are drawn in
@@ -670,15 +674,20 @@ def _draw_axis_gizmo(ax, dirs, anchor=(0.15, 0.15), length=0.11):
                 fontweight="bold", ha="center", va="center")
 
 
-def build_voxel_cube_mesh(xyz, voxel_colors, grid_size=64):
+def build_voxel_cube_mesh(xyz, voxel_colors, grid_size=64, exposed_only=False):
     """Sparse occupied voxels → a triangle mesh of per-voxel cubes.
 
     Each integer grid index in *xyz* becomes an axis-aligned cube (8 verts, 12
     triangles) centered at ``(xyz + 0.5) / grid_size - 0.5`` with side
     ``1 / grid_size``, tinted by the row-aligned RGB in *voxel_colors*.
 
+    ``exposed_only`` drops each cube side that touches another occupied voxel (it
+    can never be seen) and shares the vertices of neighbouring cubes (one per grid
+    corner and colour): the same picture, from about a fifth of the triangles and of
+    the vertices on SAM 3D's shells.
+
     Returns ``(verts (N*8, 3) float32, faces (N*12, 3) int64,
-    colors (N*8, 3) float32)``.
+    colors (N*8, 3) float32)`` (fewer rows with ``exposed_only``).
     """
     xyz = np.asarray(xyz, dtype=np.float32)
     N = xyz.shape[0]
@@ -687,6 +696,17 @@ def build_voxel_cube_mesh(xyz, voxel_colors, grid_size=64):
     verts = (_VOXEL_CUBE_V * voxel_size + centers[:, None, :]).reshape(-1, 3)
     faces = _VOXEL_CUBE_F + (np.arange(N) * 8)[:, None, None]
     colors = np.repeat(np.asarray(voxel_colors, dtype=np.float32), 8, axis=0)
+    if exposed_only:
+        ijk = xyz.astype(np.int64) + 1          # +1: a border of empty voxels
+        occupied = np.zeros((grid_size + 2,) * 3, dtype=bool)
+        occupied[tuple(ijk.T)] = True
+        exposed = np.stack([~occupied[tuple((ijk + side).T)] for side in _VOXEL_CUBE_SIDES], 1)
+        faces = faces[np.repeat(exposed, 2, axis=1)]   # (kept, 3): 2 triangles per side
+        # One vertex per (grid corner, colour): neighbouring cubes share their corners.
+        corners = (xyz[:, None, :] + _VOXEL_CUBE_V + 0.5).reshape(-1, 3)
+        keys, faces = np.unique(np.concatenate([corners, colors], 1)[faces.ravel()],
+                                axis=0, return_inverse=True)
+        verts, colors = keys[:, :3] / grid_size - 0.5, keys[:, 3:]
     return verts.astype(np.float32), faces.reshape(-1, 3), colors
 
 

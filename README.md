@@ -59,8 +59,16 @@ python demo/run_demo.py multiview   # a few views of a static scene
 python demo/run_demo.py dynamic     # a monocular video (shapes from ActionMesh)
 ```
 
-Results are written to `results/`. To run your own data, add it as a new scene folder
-under `demo/data/<setting>/`, laid out like the examples, and pass `--scene <name>`.
+Or in the browser: `python demo/app.py` (http://127.0.0.1:7860; `--dev` adds the log and
+the step table). Pick a bundled scene, or add your own image or views of a static scene and
+mask its objects with [SAM3](https://github.com/facebookresearch/sam3) (name them, or click
+them); the reconstruction runs with the same recipe, and its 3D view shows the input cameras
+and depth as soon as preprocessing has run, then the Gaussians. The 3D view is
+[3DView](https://github.com/s-esposito/3DView), built by `install.sh` when Node >= 22 is found.
+
+Results are written to `results/`. To run your own data, lay it out like the examples in
+`<dir>/<setting>/<name>/` and pass `--data-root <dir> --scene <name>`. With less than
+44 GiB of free GPU memory (e.g. on a 24 GB card) the demo turns on `--low-vram` by itself.
 See [docs/configuration.md](docs/configuration.md) for the configuration options.
 
 

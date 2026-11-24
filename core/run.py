@@ -115,8 +115,8 @@ def run_blocks(cfg: DictConfig, *, emit_preprocessing: bool = True):
         block_config, block_output_context, block_output_subdir, get_block_output_flag,
         print_config_table)
     from genia.core.utils.pipeline_state import (
-        find_latest_pipeline_cache, get_pipeline_cache_dir, load_pipeline_cache,
-        save_pipeline_cache)
+        block_cache_keys, find_latest_pipeline_cache, get_pipeline_cache_dir,
+        load_pipeline_cache, save_pipeline_cache)
     from genia.core.utils.timing import get_timer, memory_snapshot
 
     num_frames, asset_indices, frame_indices, view_indices = resolve_run_assets(cfg)
@@ -149,9 +149,10 @@ def run_blocks(cfg: DictConfig, *, emit_preprocessing: bool = True):
     cache_dir = get_pipeline_cache_dir(cfg.output.output_dir)
     state = None
     resume_idx = 0
+    keys = block_cache_keys(cfg, BLOCKS) if cfg.processing.block_cache_keyed else {}
 
     if cfg.processing.resume_from_cache:
-        latest = find_latest_pipeline_cache(cache_dir, active_blocks)
+        latest = find_latest_pipeline_cache(cache_dir, active_blocks, keys)
         if latest:
             cached_block, ckpt_path = latest
             resume_idx = active_blocks.index(cached_block) + 1
@@ -175,6 +176,10 @@ def run_blocks(cfg: DictConfig, *, emit_preprocessing: bool = True):
     # final/mem_snapshot_{block}.pickle (view at pytorch.org/memory_viz).
     mem_snapshot_block = os.environ.get("GENIA_MEM_SNAPSHOT")
 
+    # Live object poses for a viewer following the run (GENIA_LIVE_POSES=1; see live_poses).
+    from genia.core.utils import live_poses, progress
+    live_poses.start(cfg, pipeline.sequence, state)
+
     for i, block_name in enumerate(active_blocks):
         if i < resume_idx:
             timer.mark_cached(block_name)
@@ -185,9 +190,11 @@ def run_blocks(cfg: DictConfig, *, emit_preprocessing: bool = True):
                     cfg.output.output_dir, "final", f"mem_snapshot_{block_name}.pickle"))
                 if block_name == mem_snapshot_block else contextlib.nullcontext()
             )
+            progress.set_object(None)   # a block's loops are no object's until it says so
             with block_output_context(cfg, block_name), snap_ctx:
                 pipeline.run_block(block_name, state)
             timer.end_block(block_name)
+            live_poses.publish_state(state)   # a viewer's, so outside the block's timing
             # A block that wrote nothing (e.g. under suppress_intermediate_*) leaves no
             # folder behind; final/timing.json records which blocks ran.
             _remove_empty_dirs(os.path.join(
@@ -195,7 +202,7 @@ def run_blocks(cfg: DictConfig, *, emit_preprocessing: bool = True):
             state.check_consistency()
             was_loaded = block_name in getattr(state, "_loaded_block_caches", set())
             if get_block_output_flag(cfg, block_name, "save_cache") and not was_loaded:
-                save_pipeline_cache(state, block_name, cache_dir)
+                save_pipeline_cache(state, block_name, cache_dir, keys.get(block_name))
 
         # Check exit_after flag on the block's config (even for cached blocks)
         if getattr(block_config(cfg, block_name), "exit_after", False):

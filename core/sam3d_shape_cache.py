@@ -40,7 +40,9 @@ from genia.core.paths import GENIA_ROOT
 from genia.core.utils.disk_cache import (GENERATION_SECONDS, PEAK_ALLOC_MB,
                                      load_blob, store_blob)
 
-_CACHE_KEY_VERSION = "v1"
+# v2 (2026-11-17): pixel-centre convention (the pointmaps the shape pass reads moved half a
+# pixel; K corner-convention, exact stride / crop / native K).
+_CACHE_KEY_VERSION = "v2"
 
 
 def fk_str(fk) -> str:

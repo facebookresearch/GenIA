@@ -17,6 +17,8 @@ work offline. Files already cached are left alone.
 - ActionMesh, which supplies the shapes of dynamic scenes, with TripoSG, DINOv2 and RMBG
   (~17 GB; ``core/actionmesh_video.py`` points ActionMesh at them).
 - map-anything and MoGe (depth), SAM 3D Objects' DINOv2 image encoder and the LPIPS backbone.
+- SAM3, which makes the demo app's masks (``--no-sam3`` skips it). Gated like SAM 3D
+  Objects: accept its licence at https://huggingface.co/facebook/sam3.
 """
 import argparse
 import sys
@@ -34,6 +36,8 @@ ACTIONMESH_WEIGHTS = [
 #: Hugging Face models loaded at run time: map-anything (depth + cameras) and MoGe (depth;
 #: also SAM 3D Objects' depth model).
 RUNTIME_HF = ["facebook/map-anything", "Ruicheng/moge-vitl"]
+#: SAM3 (the demo app's masks): the files ``sam3.model_builder.download_ckpt_from_hf`` reads.
+SAM3_WEIGHTS = ("facebook/sam3", ["config.json", "sam3.pt"])
 #: SAM 3D Objects' image encoder, loaded through torch hub.
 DINO_HUB = ("facebookresearch/dinov2", "dinov2_vitl14_reg")
 #: LPIPS backbone: VGG for the perceptual loss.
@@ -85,6 +89,8 @@ def main() -> int:
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--no-actionmesh", action="store_true",
                     help="skip the ActionMesh weights (only needed for dynamic scenes)")
+    ap.add_argument("--no-sam3", action="store_true",
+                    help="skip SAM3 (only needed for the demo app's masks)")
     ap.add_argument("--dry-run", action="store_true", help="print what would be downloaded")
     args = ap.parse_args()
 
@@ -94,6 +100,9 @@ def main() -> int:
             rc = fetch_hf(repo, args.dry_run) or rc
     for repo in RUNTIME_HF:
         rc = fetch_hf(repo, args.dry_run, HF_PATTERNS) or rc
+    if not args.no_sam3:
+        repo, files = SAM3_WEIGHTS
+        rc = fetch_hf(repo, args.dry_run, files) or rc
     fetch_torch_hub(args.dry_run)
     return rc
 

@@ -9,6 +9,7 @@ backbone, the state the blocks start from, and what each block runs.
 
 import os
 
+from genia.core.manifest import BLOCKS
 from genia.core.pose_refine import run_global_refine
 from genia.core.utils.config import block_output_subdir
 from genia.core.utils.timing import get_timer
@@ -20,6 +21,15 @@ from genia.core.main import (
     set_default_canon_frames,
 )
 from genia.core.state import SAM3DState
+
+#: Blocks that move the objects. With their renders on (or ``output.save_previews``), each
+#: writes the posed voxel-grid preview to ``NN_{block}/voxel_grid/`` (``export_voxel_grid``).
+VOXEL_GRID_AFTER = ("pose_init", "global_pose_refine_1", "finetune", "global_pose_refine_2")
+#: Blocks that change how the objects look. Likewise, each writes every object's splats to
+#: ``NN_{block}/splats/`` (``export_object_splats``).
+PREVIEW_SPLATS_AFTER = ("appearance_init", "appearance_init_2", "finetune")
+#: The first of these blocks with poses writes the run's ``pose_cubes.glb`` (``export_pose_cubes``).
+POSE_CUBES_AFTER = ("shape_init",) + VOXEL_GRID_AFTER
 
 
 class Pipeline:
@@ -134,16 +144,6 @@ class Pipeline:
             run_global_refine(
                 cfg, state, sequence, pipeline_obj, evaluator, device,
                 config_override=cfg.global_pose_refine_1, block_label="GLOBAL_POSE_REFINE_1")
-            if cfg.output.save_renders:
-                with get_timer().exclude():
-                    from genia.core.utils.eval_assets_export import export_coarse_shape_wireframe
-                    block_dir = os.path.join(
-                        cfg.output.output_dir, block_output_subdir(cfg, block_name))
-                    try:
-                        export_coarse_shape_wireframe(
-                            cfg, state, sequence, block_dir, pipeline_obj)
-                    except Exception as e:  # noqa: BLE001 — a preview must not fail the block
-                        print(f"  coarse-shape wireframe preview failed (non-fatal): {e}")
         elif block_name == "appearance_init_2":
             run_appearance_init(
                 cfg, state, sequence, inference, pipeline_obj, evaluator, device,
@@ -156,3 +156,28 @@ class Pipeline:
                 config_override=cfg.global_pose_refine_2, block_label="GLOBAL_POSE_REFINE_2")
         else:
             raise KeyError(f"no runner for block {block_name!r}")
+
+        # Previews for a viewer following the run (the newest block's of each wins): the
+        # posed voxel grid after every block that moved the objects, each object's splats
+        # after every block that changed how it looks, and once poses exist, the objects'
+        # pose cubes. Forced on (output.save_previews), they still skip a disabled block,
+        # whose renders are off for that reason.
+        previews = cfg.output.save_previews
+        if (block_name in VOXEL_GRID_AFTER + PREVIEW_SPLATS_AFTER + POSE_CUBES_AFTER
+                and (cfg.output.save_renders if previews is None
+                     else previews and cfg[dict(BLOCKS)[block_name]].enabled)):
+            with get_timer().exclude():
+                from genia.core.utils.eval_assets_export import (
+                    export_object_splats, export_pose_cubes, export_voxel_grid)
+                block_dir = os.path.join(
+                    cfg.output.output_dir, block_output_subdir(cfg, block_name))
+                try:
+                    if block_name in POSE_CUBES_AFTER:
+                        export_pose_cubes(cfg, state, sequence, os.path.join(
+                            cfg.output.output_dir, "pose_cubes.glb"))
+                    if block_name in PREVIEW_SPLATS_AFTER:
+                        export_object_splats(state, sequence, block_dir)
+                    if block_name in VOXEL_GRID_AFTER:
+                        export_voxel_grid(cfg, state, sequence, block_dir, pipeline_obj)
+                except Exception as e:  # noqa: BLE001 — a preview must not fail the block
+                    print(f"  {block_name} preview failed (non-fatal): {e}")

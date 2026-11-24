@@ -129,8 +129,10 @@ def actionbench_intrinsics(H: int, W: int, scene_name: str,
     res_ref = float(cam["image_hw"][0])
     s = float(H) / res_ref
     fx = fy = focal_ref * s
-    cx = (W - 1) * 0.5
-    cy = (H - 1) * 0.5
+    # Corner convention, as gsplat renders: Blender rendered the images unshifted, and
+    # camera.json's own (W - 1) / 2 is that point in the integer-pixel convention.
+    cx = W * 0.5
+    cy = H * 0.5
     return np.array([[fx, 0.0, cx], [0.0, fy, cy], [0.0, 0.0, 1.0]],
                     dtype=np.float32)
 

@@ -13,7 +13,7 @@ from typing import Dict, List, Optional
 
 import numpy as np
 
-from .recon_cache import ReconResult, masking_key_suffix, run_cached
+from .recon_cache import ReconResult, index_grid_to_corner_K, masking_key_suffix, run_cached
 
 
 #: The per-frame result type lives in `recon_cache`, beside the cache that stores it;
@@ -106,7 +106,8 @@ def run_map_anything(
             )
             view["depth_z"] = dataset_depths[fi]
         if has_dataset_intrinsics and fi in dataset_intrinsics:
-            view["intrinsics"] = dataset_intrinsics[fi]
+            # MA casts its rays through integer pixel indices; ours are corner K.
+            view["intrinsics"] = index_grid_to_corner_K(dataset_intrinsics[fi], sign=-1)
         if has_dataset_poses and fi in dataset_camera_poses:
             view["camera_poses"] = dataset_camera_poses[fi]
         input_views.append(view)
@@ -160,7 +161,8 @@ def run_map_anything(
             # depth and image are pixel-aligned.
             depth_z = pred["depth_z"][0].squeeze(-1).cpu().numpy()  # (H_m, W_m)
             valid_mask = pred["mask"][0].squeeze(-1).cpu().numpy() > 0.5  # (H_m, W_m)
-            K = pred["intrinsics"][0].cpu().numpy()  # (3, 3)
+            # Recovered on MA's integer pixel grid -> the corner convention.
+            K = index_grid_to_corner_K(pred["intrinsics"][0].cpu().numpy())  # (3, 3)
 
             # Reject the pixels MA itself rates as guesses -- see
             # ``ProcessingConfig.recon_confidence_min``. Narrowing `valid_mask` is the

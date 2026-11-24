@@ -407,7 +407,7 @@ def _covisible_mask_from_depths(z_test, a_test, c2w_test, K_test, input_buffers,
     fx, fy, cx, cy = Kt[0, 0], Kt[1, 1], Kt[0, 2], Kt[1, 2]
     zt = z_test[ys, xs]
     pc = torch.stack(
-        [(xs.float() - cx) / fx * zt, (ys.float() - cy) / fy * zt, zt], dim=-1
+        [(xs.float() + 0.5 - cx) / fx * zt, (ys.float() + 0.5 - cy) / fy * zt, zt], dim=-1
     )
     c2w = _t(c2w_test)
     pw = pc @ c2w[:3, :3].T + c2w[:3, 3]  # test foreground -> R3 world
@@ -420,8 +420,8 @@ def _covisible_mask_from_depths(z_test, a_test, c2w_test, K_test, input_buffers,
         fxi, fyi, cxi, cyi = Ki[0, 0], Ki[1, 1], Ki[0, 2], Ki[1, 2]
         p = pw @ w2c[:, :3].T + w2c[:, 3]
         zc = p[:, 2]
-        u = (fxi * p[:, 0] / zc + cxi).round().long()
-        v = (fyi * p[:, 1] / zc + cyi).round().long()
+        u = torch.floor(fxi * p[:, 0] / zc + cxi).long()     # the pixel it falls in
+        v = torch.floor(fyi * p[:, 1] / zc + cyi).long()
         inb = (zc > 1e-6) & (u >= 0) & (u < Wi) & (v >= 0) & (v < Hi)
         uc, vc = u.clamp(0, Wi - 1), v.clamp(0, Hi - 1)
         covis |= inb & (a_in[vc, uc] > 0.5) & ((zc - z_in[vc, uc]).abs() < tau)
@@ -958,92 +958,207 @@ def export_world_space_assets(cfg, state, sequence, final_output_dir, pipeline_o
             print("  world mesh: skipped (no per-object mesh available)")
 
 
-def export_coarse_shape_wireframe(cfg, state, sequence, block_dir, pipeline_obj) -> int:
-    """Posed coarse-shape wireframe preview -> ``coarse_shape/world[.glb|/{f:03d}.glb]``.
+def _davis_color(i: int) -> np.ndarray:
+    """Instance ``i``'s colour in the DAVIS palette, the one the demo masks use, as RGB in [0, 1]."""
+    rgb = [0, 0, 0]
+    for j in range(8):
+        for k in range(3):
+            rgb[k] |= ((i >> k) & 1) << (7 - j)
+        i >>= 3
+    return np.array(rgb, dtype=np.float32) / 255.0
 
-    A mid-pipeline preview for an interactive 3D viewer, NOT a FINAL export: called right after the
-    ``global_pose_refine_1`` block, when the Stage-1 shape latent (a ``(1,4096,8)``
-    tensor decoding to a 64**3 occupancy grid) and per-frame poses already exist,
-    long before Stage-2 appearance refinement. ``block_dir`` is the caller-resolved
-    ``NN_global_pose_refine_1`` output dir (see ``block_output_subdir``); this
-    function only owns the ``coarse_shape/`` sub-path under it, mirroring
-    ``final/meshes/world*.glb``'s naming convention one level down so the two are
-    never confused for each other.
 
-    Exported as literal ``GL_LINES`` geometry (a ``trimesh.path.Path3D`` GLB), not a
-    normal triangle mesh, so "wireframe" is baked into the file itself and renders
-    as one in any glTF viewer, with no per-asset material override needed.
+def object_world_matrix(rotation, translation, scale, anchor_c2w, device) -> np.ndarray:
+    """The 4x4 placing an object's canonical frame in the world (row-major numpy).
 
-    Edge topology (``edges_unique``) is decoded once per object, not once per
-    (object, frame): posing only moves vertices, it never changes which vertices
-    share a face. Per frame, each object's posed segment array is built
-    independently and concatenated -- since only line segments are needed (not a
-    watertight combined mesh), there is no cross-object vertex-index offset to get
-    right, unlike ``_export_world_meshes``.
+    Exactly ``_pose_mesh_verts_to_world`` -- the transform the final meshes and splats get --
+    which is affine (scale, the row-vector rotation, translation, P3D->R3, the anchor c2w),
+    so its matrix is read off where it sends the origin and the three unit axes.
+    """
+    points = torch.tensor([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+                          device=device)
+    world = _pose_mesh_verts_to_world(
+        points, rotation.to(device), translation.to(device), scale.to(device), anchor_c2w,
+    ).detach().double().cpu().numpy()
+    matrix = np.eye(4)
+    matrix[:3, :3] = (world[1:] - world[0]).T
+    matrix[:3, 3] = world[0]
+    return matrix
+
+
+def export_voxel_grid(cfg, state, sequence, block_dir, pipeline_obj) -> int:
+    """Posed voxel-grid preview -> ``voxel_grid/world[.glb|/{f:03d}.glb]``.
+
+    A mid-pipeline preview for an interactive 3D viewer, NOT a FINAL export: called after
+    each block that moves the objects (``pipeline.VOXEL_GRID_AFTER``, from ``pose_init``
+    on), when the Stage-1 shape latents and per-frame poses exist. Each object's occupied
+    voxels (the 64**3 grid its shape latent decodes to, ``decode_shape_to_coords``) are
+    cubes (``build_voxel_cube_mesh``: side 1/64, centred at ``(i + 0.5)/64 - 0.5`` like
+    every voxel here; the sides between two voxels dropped) in its canonical frame,
+    coloured in the DAVIS palette the masks use, in a glTF node ``obj_{i}`` whose
+    transform is the object's world placement (``object_world_matrix``, the final assets'
+    own). A viewer can thus move each object by its node, to the poses ``live_poses``
+    streams while they are optimised.
+    ``block_dir`` is the caller-resolved ``NN_{block}`` dir; this function owns only the
+    ``voxel_grid/`` sub-path under it.
 
     A ``.complete`` sentinel is written once every frame has been exported, so a
-    concurrent reader (e.g. a viewer polling the directory) never sees a
-    directory -- or, for a static run, a lone ``world.glb`` -- mid-write.
+    concurrent reader (a viewer polling the directory) never sees a directory -- or, for
+    a static run, a lone ``world.glb`` -- mid-write.
 
-    Callers must wrap this in ``_TIMER.exclude()`` (its call site sits inside a
-    timed pipeline block, unlike every other export in this file) and in a
-    ``try/except`` (a preview must never fail the block it's attached to --
-    mirrors ``export_orbit_viz``'s own call-site precedent, not handled in here).
+    Callers must wrap this in ``_TIMER.exclude()`` and a ``try/except``: a preview must
+    never fail the block it is attached to.
     """
     import trimesh
 
-    from .mesh_rendering import diffmc_mesh
-    from genia.core.utils.slat_decode import decode_shape_to_occ
+    from genia.core.utils.slat_decode import decode_shape_to_coords
+    from genia.core.utils.visualization import build_voxel_cube_mesh
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    canonical_by_obj = {}  # obj_idx -> (verts (V,3) canonical, edges (E,2) long)
+    canonical_by_obj = {}  # obj_idx -> the object's cubes in its canonical frame
     for obj_idx, raw in state.canonical_raw_modalities.items():
         if obj_idx == 0:
             continue
-        occ = decode_shape_to_occ(pipeline_obj, raw["shape"].to(device))
-        verts, faces = diffmc_mesh(occ, device)
-        if verts.shape[0] == 0 or faces.shape[0] == 0:
-            continue  # iso-surface didn't form -- same guard rendering_guidance.py uses
-        edges = trimesh.Trimesh(
-            vertices=verts.detach().cpu().numpy(), faces=faces.cpu().numpy(),
-            process=False,
-        ).edges_unique
-        canonical_by_obj[obj_idx] = (verts, torch.as_tensor(edges, device=device))
+        xyz = decode_shape_to_coords(pipeline_obj, raw["shape"].to(device))[:, 1:].cpu().numpy()
+        if len(xyz) == 0:
+            continue
+        verts, faces, colours = build_voxel_cube_mesh(
+            xyz, np.tile(_davis_color(obj_idx), (len(xyz), 1)), exposed_only=True)
+        canonical_by_obj[obj_idx] = trimesh.Trimesh(
+            vertices=verts, faces=faces, vertex_colors=(colours * 255).astype(np.uint8),
+            process=False)
     if not canonical_by_obj:
         return 0
 
     frames = (sorted({_fr(fk) for fk in sequence.frame_keys})
               if sequence.is_dynamic else [None])
-    coarse_root = os.path.join(block_dir, "coarse_shape")
-    os.makedirs(coarse_root, exist_ok=True)
+    grid_root = os.path.join(block_dir, "voxel_grid")
+    os.makedirs(grid_root, exist_ok=True)
     n = 0
     for frame in frames:
         anchor_c2w = _world_anchor_c2w(cfg, sequence, frame)
-        segments = []
-        for obj_idx, (verts, edges) in canonical_by_obj.items():
+        scene = trimesh.Scene()
+        for obj_idx, mesh in canonical_by_obj.items():
             per_frame_tokens = state.tokens_by_object.get(obj_idx, [])
             match = (per_frame_tokens[:1] if frame is None else
                      [(fk, d) for (fk, d) in per_frame_tokens if _fr(fk) == frame])
             if not match:
                 continue
             di = match[0][1]
-            world_verts = _pose_mesh_verts_to_world(
-                verts, di["rotation"].to(device), di["translation"].to(device),
-                di["scale"].to(device), anchor_c2w,
-            )
-            segments.append(world_verts[edges].detach().cpu().numpy())  # (E,2,3)
-        if not segments:
+            scene.add_geometry(mesh, node_name=f"obj_{obj_idx}", geom_name=f"obj_{obj_idx}",
+                               transform=object_world_matrix(
+                                   di["rotation"], di["translation"], di["scale"],
+                                   anchor_c2w, device))
+        if not scene.geometry:
             continue
-        path = _world_asset_path(coarse_root, "world", frame, "glb")
-        # Path3D.export() only knows path formats (dxf/svg/...), not glb -- .scene()
-        # wraps it so the general glTF exporter handles it, writing GL_LINES verbatim
-        # (verified: trimesh has no single-call Path3D-to-glb shortcut for this).
-        trimesh.load_path(np.concatenate(segments, axis=0)).scene().export(path)
+        scene.export(_world_asset_path(grid_root, "world", frame, "glb"))
         n += 1
 
     if n:
-        open(os.path.join(coarse_root, ".complete"), "w").close()
+        open(os.path.join(grid_root, ".complete"), "w").close()
+    return n
+
+
+#: Pose cubes: edge and axis thickness, in units of the cube's side.
+_POSE_CUBE_EDGE = 0.012
+_POSE_CUBE_AXIS = 0.024
+_AXIS_COLOURS = ((0.9, 0.1, 0.1), (0.1, 0.7, 0.1), (0.15, 0.35, 0.95))   # x red, y green, z blue
+
+
+def _pose_cube_mesh(colour):
+    """The object frame's cube ``[-0.5, 0.5]^3`` as 12 thin beams in ``colour``, plus its
+    x/y/z axes from the centre to the faces (red, green, blue), which a cube alone leaves
+    ambiguous: one trimesh, in that frame."""
+    import trimesh
+
+    parts = []
+    for axis in range(3):
+        other = [a for a in range(3) if a != axis]
+        for u in (-0.5, 0.5):
+            for v in (-0.5, 0.5):
+                centre, extents = np.zeros(3), np.full(3, _POSE_CUBE_EDGE)
+                centre[other], extents[axis] = (u, v), 1 + _POSE_CUBE_EDGE
+                parts.append((centre, extents, colour))
+        centre, extents = np.zeros(3), np.full(3, _POSE_CUBE_AXIS)
+        centre[axis], extents[axis] = 0.25, 0.5
+        parts.append((centre, extents, _AXIS_COLOURS[axis]))
+    meshes = []
+    for centre, extents, c in parts:
+        box = trimesh.creation.box(extents=extents)
+        box.apply_translation(centre)
+        box.visual.vertex_colors = np.append(np.asarray(c) * 255, 255).astype(np.uint8)
+        meshes.append(box)
+    return trimesh.util.concatenate(meshes)
+
+
+def export_pose_cubes(cfg, state, sequence, path) -> bool:
+    """Each object's pose as a cube -> one GLB at ``path``, for a viewer; True if written.
+
+    The cube is the object frame's ``[-0.5, 0.5]^3`` (SAM 3D's object cube, the one its
+    voxel grid fills) with that frame's axes (``_pose_cube_mesh``), in a glTF node
+    ``obj_{i}`` placed like the voxel grid's (``object_world_matrix`` of the pose that
+    places the object), so it shows the pose itself: rotation, translation and scale.
+    Written once, when the first poses exist (a file already there is kept): the geometry
+    never changes, and a viewer moves each node to the poses ``live_poses`` streams.
+    Static scenes only, like ``live_poses``.
+    """
+    import trimesh
+
+    if sequence.is_dynamic or os.path.exists(path):
+        return False
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    anchor_c2w = _world_anchor_c2w(cfg, sequence, None)
+    scene = trimesh.Scene()
+    for obj_idx, tokens in state.tokens_by_object.items():
+        if obj_idx == 0 or not tokens or "rotation" not in tokens[0][1]:
+            continue
+        di = tokens[0][1]
+        scene.add_geometry(_pose_cube_mesh(_davis_color(obj_idx)), node_name=f"obj_{obj_idx}",
+                           geom_name=f"obj_{obj_idx}", transform=object_world_matrix(
+                               di["rotation"], di["translation"], di["scale"], anchor_c2w,
+                               device))
+    if not scene.geometry:
+        return False
+    tmp = path + ".tmp"
+    with open(tmp, "wb") as f:
+        f.write(scene.export(file_type="glb"))
+    os.replace(tmp, path)   # a reader never sees half a file
+    return True
+
+
+def export_object_splats(state, sequence, block_dir) -> int:
+    """Each object's current Gaussians -> ``splats/obj_{i}.compressed.ply``, for a viewer.
+
+    A mid-pipeline preview, NOT a FINAL export: called after each block that changes the
+    objects' appearance (``pipeline.PREVIEW_SPLATS_AFTER``). Each file is one object in its
+    own canonical frame: its canonical Gaussians, else those of the frame that places it
+    (``live_poses.anchor``'s, the first token's). Its world placement is not baked in: it is
+    ``object_world_matrix`` of that frame's pose, which ``live_poses`` streams, so a viewer
+    places (and moves) each file as it does the voxel grid's ``obj_{i}`` nodes. Static
+    scenes only, like ``live_poses``. ``.complete`` is written last, once every file is.
+    """
+    from .io_utils import save_gaussian_compressed_ply
+
+    if sequence.is_dynamic:
+        return 0
+    canonical = state.canonical_gaussians or {}
+    perframe = state.perframe_gaussians or {}
+    root = os.path.join(block_dir, "splats")
+    n = 0
+    for obj_idx, tokens in state.tokens_by_object.items():
+        if obj_idx == 0 or not tokens:
+            continue
+        gaussian = canonical.get(obj_idx)
+        if gaussian is None:
+            gaussian = (perframe.get(obj_idx) or {}).get(tokens[0][0])
+        if gaussian is None:
+            continue
+        os.makedirs(root, exist_ok=True)
+        save_gaussian_compressed_ply(gaussian, os.path.join(root, f"obj_{obj_idx}.compressed.ply"))
+        n += 1
+    if n:
+        open(os.path.join(root, ".complete"), "w").close()
     return n
 
 
@@ -1056,8 +1171,8 @@ def _test_intrinsics_scaled(cam_entry, json_image_hw, out_h, out_w):
     K = np.array(cam_entry["K"], dtype=np.float32).copy()
     K[0, 0] *= float(out_w) / w_json
     K[1, 1] *= float(out_h) / h_json
-    K[0, 2] = (out_w - 1) * 0.5
-    K[1, 2] = (out_h - 1) * 0.5
+    K[0, 2] = out_w * 0.5     # corner convention (Blender rendered unshifted)
+    K[1, 2] = out_h * 0.5
     return K
 
 

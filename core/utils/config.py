@@ -117,6 +117,18 @@ class ProcessingConfig:
     Affects only the ``.pt`` checkpoint resume path — nothing else.
     """
 
+    block_cache_keyed: bool = False
+    """Key each block's cache on the config its state depends on.
+
+    Off, a run resumes after the latest ``{block}.pt`` in the cache directory whatever the
+    config that wrote it. On, each block's cache is ``{block}.{key}.pt``, ``key`` hashing
+    the whole config but ``output`` and the sections of the blocks after it
+    (:func:`block_cache_keys`), and a run resumes only after the latest block whose key
+    matches: changing a block's settings re-runs it and every block after it, and nothing
+    before. The key covers the config, not the input files: a caller whose inputs change
+    under the same scene name and output path must not set it.
+    """
+
     median_intrinsics: bool = False
     """Use median camera intrinsics across keyframes (MoGe depth only).
 
@@ -229,6 +241,12 @@ class ProcessingConfig:
     pipeline blocks). Off by default so benchmark runs always recompute their own
     depth; useful when the same scene is re-run many times.
     """
+
+    keep_recon_model: bool = False
+    """Keep the reconstruction backend (map-anything) loaded after PREPROCESSING instead
+    of freeing it, so the next run in the same process skips its load: a warm demo
+    worker on a GPU with room for it. Off by default: resident, its weights count
+    towards every later block's peak memory."""
 
     depth_source: str = "pred"
     """Final per-frame depth source: ``'pred'`` (predicted by
@@ -794,6 +812,14 @@ class OutputConfig:
 
     suppress_intermediate_metrics: bool = False
     """Force save_metrics=False for every pipeline block (and any other tag). FINAL unaffected."""
+
+    save_previews: Optional[bool] = None
+    """Previews for a viewer following the run: the posed voxel grid after each block
+    that moves the objects (``NN_{block}/voxel_grid/``), each object's splats after
+    each block that changes how it looks (``NN_{block}/splats/``) and, once poses exist,
+    each object's pose as a cube (``pose_cubes.glb``). null = when the block
+    saves its renders; true/false force them either way (the demo app: true, with every
+    other intermediate output off)."""
 
     render_decoded: bool = False
     """Render decoded objects from multiple viewpoints right after decoding."""

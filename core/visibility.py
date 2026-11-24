@@ -483,10 +483,10 @@ def compute_visibility_multi_object(
             cam = canonical * sc @ R + trans
             z = cam[:, 2].copy()
             safe_z = np.maximum(z, 1e-8)
-            proj_u[oi] = np.round(
+            proj_u[oi] = np.floor(          # the pixel it falls in
                 fx * (-cam[:, 0]) / safe_z + cx,
             ).astype(np.int64)
-            proj_v[oi] = np.round(
+            proj_v[oi] = np.floor(
                 fy * (-cam[:, 1]) / safe_z + cy,
             ).astype(np.int64)
             proj_z[oi] = z

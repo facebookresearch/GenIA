@@ -1,8 +1,8 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 
 # Pure-Python / prebuilt dependencies. torch, torchvision and the CUDA extensions
-# (diso, pytorch3d, gsplat, nvdiffrast, fused-ssim, xformers, spconv) are installed by
-# install.sh, pinned to torch 2.7.1 + CUDA 12.8.
+# (pytorch3d, gsplat, nvdiffrast, fused-ssim, xformers, spconv) are installed by
+# install.sh, pinned to torch 2.8.0 + CUDA 12.8.
 astor==0.8.1
 easydict==1.13
 einops==0.8.1
@@ -19,7 +19,7 @@ moviepy==1.0.3
 numba==0.63.1
 numpy==1.26.4
 omegaconf==2.3.0
-open3d==0.18.0
+open3d==0.19.0
 opencv-python==4.9.0.80
 optree==0.14.1
 peft==0.19.1
@@ -63,3 +63,9 @@ jaxtyping==0.3.4
 typeguard==4.4.4
 # Compressed PLY export (output.save_compressed_ply).
 gsconverter @ git+https://github.com/francescofugazzi/3dgsconverter.git@99bec766bb074d49da89614d077fba58fdd843ae
+# The demo app (demo/app.py) and its SAM3 masks (submodules/sam3, installed --no-deps by
+# install.sh: SAM3 pins ftfy 6.1.1 and lists pycocotools only as a dev extra).
+gradio==5.49.0
+ftfy==6.2.0
+iopath==0.1.10
+pycocotools==2.0.11

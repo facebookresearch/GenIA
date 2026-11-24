@@ -21,48 +21,6 @@ if TYPE_CHECKING:
     from sam3d_objects.model.backbone.tdfy_dit.modules import sparse as sp
 
 
-def decode_shape_to_occ(
-    pipeline_or_inference: Any,
-    shape_latent: torch.Tensor,
-) -> torch.Tensor:
-    """Decode a shape latent into the dense 64³ sigmoid occupancy grid.
-
-    Sibling of :func:`decode_shape_to_coords` that returns the continuous
-    occupancy grid (``sigmoid(logits)``) instead of the binarized
-    occupied-voxel coordinates.  Its caller, the coarse-shape wireframe
-    preview (:func:`eval_assets_export.export_coarse_shape_wireframe`), extracts
-    an iso-surface from it with :func:`mesh_rendering.diffmc_mesh`.
-
-    Parameters
-    ----------
-    pipeline_or_inference : Pipeline or Inference
-        Either the SAM3D pipeline directly (has ``.models``) or the
-        Inference wrapper (has ``._pipeline``).
-    shape_latent : torch.Tensor
-        Shape latent of shape ``(1, 4096, 8)``.
-
-    Returns
-    -------
-    torch.Tensor
-        Sigmoid occupancy ``(64, 64, 64)`` in ``[0, 1]`` on the latent's
-        device.
-    """
-    if hasattr(pipeline_or_inference, '_pipeline'):
-        pipeline = pipeline_or_inference._pipeline
-    else:
-        pipeline = pipeline_or_inference
-    ss_decoder = pipeline.models["ss_decoder"]
-    with torch.no_grad():
-        shape_cube = (
-            shape_latent
-            .permute(0, 2, 1)
-            .contiguous()
-            .view(1, 8, 16, 16, 16)
-        )
-        logits = ss_decoder(shape_cube.to(dtype=ss_decoder.dtype))
-        return torch.sigmoid(logits[0, 0].float())
-
-
 def decode_shape_to_coords(
     pipeline_or_inference: Any,
     shape_latent: torch.Tensor,

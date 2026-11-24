@@ -76,8 +76,9 @@ def crop_resize_transform(orig_shape, target_shape):
     Single source of truth for mapping between original-image and processed-image
     pixel coords (used both to crop the masks here AND, recorded into the artifact,
     to un-crop the exported 2D tracks during evaluation).  Returns
-    ``(scale, left, top, scaled_w, scaled_h)``; a processed pixel ``(u, v)`` maps
-    back to the original image as ``((u + left) / scale, (v + top) / scale)``.
+    ``(scale, left, top, scaled_w, scaled_h)``; a processed continuous coordinate
+    ``(u, v)`` maps back to the original image as ``((u + left) / s_x, (v + top) / s_y)``
+    with the per-axis scales of :func:`crop_resize_scales`.
     """
     orig_h, orig_w = orig_shape
     target_h, target_w = target_shape
@@ -87,6 +88,46 @@ def crop_resize_transform(orig_shape, target_shape):
     left = (scaled_w - target_w) // 2
     top = (scaled_h - target_h) // 2
     return scale, left, top, scaled_w, scaled_h
+
+
+# Intrinsics under resampling. Every K is CORNER-convention, as gsplat renders (pixel
+# ``i`` spans ``[i, i + 1)``, centre ``i + 0.5``; a GT camera's principal point at
+# ``W / 2``): continuous pixel coordinates then follow a centre-aligned resize (cv2
+# INTER_AREA / INTER_LINEAR / INTER_NEAREST_EXACT) as a pure per-axis scale.
+
+def crop_resize_scales(orig_shape, target_shape):
+    """``(s_x, s_y, left, top)``: the per-axis scales the image ACTUALLY took in
+    :func:`crop_resize_transform` (``scaled_w / orig_w``, ``scaled_h / orig_h``: the floor
+    makes them differ from its scalar ``scale``), and its crop offsets."""
+    _scale, left, top, scaled_w, scaled_h = crop_resize_transform(orig_shape, target_shape)
+    return scaled_w / orig_shape[1], scaled_h / orig_shape[0], left, top
+
+
+def stride_intrinsics(K, d: int) -> np.ndarray:
+    """``K`` after ``arr[::d, ::d]``, which keeps pixel ``d j`` (centre ``d j + 0.5`` ->
+    ``j + 0.5``): ``cx' = (cx - 0.5) / d + 0.5`` (``cx / d`` is ``(d - 1) / (2 d)`` px off)."""
+    K = np.array(K, dtype=np.float64, copy=True)
+    if d == 1:
+        return K
+    K[0, 0] /= d
+    K[0, 1] /= d
+    K[1, 1] /= d
+    K[0, 2] = (K[0, 2] - 0.5) / d + 0.5
+    K[1, 2] = (K[1, 2] - 0.5) / d + 0.5
+    return K
+
+
+def unstride_intrinsics(K, d: int) -> np.ndarray:
+    """The inverse of :func:`stride_intrinsics`."""
+    K = np.array(K, dtype=np.float64, copy=True)
+    if d == 1:
+        return K
+    K[0, 0] *= d
+    K[0, 1] *= d
+    K[1, 1] *= d
+    K[0, 2] = (K[0, 2] - 0.5) * d + 0.5
+    K[1, 2] = (K[1, 2] - 0.5) * d + 0.5
+    return K
 
 
 #: map-anything's `fixed_mapping` resolution tables, VENDORED from
@@ -128,8 +169,9 @@ def _crop_resize_image(image: np.ndarray, target_shape: tuple, interp=None) -> n
     The image half of :func:`_crop_masks_to_match`; both read their geometry from
     :func:`crop_resize_transform`, so they cannot disagree about where the crop fell.
     ``interp`` overrides the scale-chosen interpolator for data that must not be
-    blended -- GT depth passes ``cv2.INTER_NEAREST``, because averaging across a depth
-    discontinuity fabricates a surface that exists at no pixel.
+    blended -- GT depth passes ``cv2.INTER_NEAREST_EXACT``, because averaging across a depth
+    discontinuity fabricates a surface that exists at no pixel (the EXACT nearest:
+    centre-aligned like the image's resize; plain INTER_NEAREST sits half a pixel off it).
     """
     import cv2
 
@@ -146,20 +188,21 @@ def crop_resize_intrinsics(K: np.ndarray, orig_shape: tuple,
                            target_shape: tuple) -> np.ndarray:
     """``K`` moved from the original image frame into the cropped/resized one.
 
-    :func:`crop_resize_transform` maps a processed pixel back as ``(u + left) / scale``,
-    so forward::
+    The image is resized to ``(scaled_w, scaled_h)`` (centre-aligned), then cropped, so
+    with the per-axis scales it ACTUALLY took (:func:`crop_resize_scales`)::
 
-        fx' = s*fx      cx' = s*cx - left
-        fy' = s*fy      cy' = s*cy - top
+        fx' = s_x*fx      cx' = s_x*cx - left
+        fy' = s_y*fy      cy' = s_y*cy - top
 
     Used for map-anything's GT-K override.
     """
-    scale, left, top, _sw, _sh = crop_resize_transform(orig_shape, target_shape)
+    s_x, s_y, left, top = crop_resize_scales(orig_shape, target_shape)
     out = np.asarray(K, dtype=np.float32).copy()
-    out[0, 0] *= scale
-    out[1, 1] *= scale
-    out[0, 2] = out[0, 2] * scale - left
-    out[1, 2] = out[1, 2] * scale - top
+    out[0, 0] *= s_x
+    out[0, 1] *= s_x
+    out[1, 1] *= s_y
+    out[0, 2] = out[0, 2] * s_x - left
+    out[1, 2] = out[1, 2] * s_y - top
     return out
 
 
@@ -192,10 +235,11 @@ def _crop_masks_to_match(
 
     cropped_data = {}
     for obj_id, mask in masks.items():
-        # Resize to scaled size (nearest to keep binary)
+        # Resize to scaled size (nearest to keep binary; the EXACT one is centre-aligned
+        # like the image's resize, plain INTER_NEAREST half a pixel off it)
         resized = cv2.resize(
             mask.astype(np.uint8), (scaled_w, scaled_h),
-            interpolation=cv2.INTER_NEAREST,
+            interpolation=cv2.INTER_NEAREST_EXACT,
         )
         # Center-crop
         cropped = resized[top:top + target_h, left:left + target_w]
@@ -1084,9 +1128,8 @@ class Sequence:
             {k: v[::d, ::d] for k, v in masks.items()},
             shape=(image.shape[0], image.shape[1]),
         )
-        K_matrix = K_matrix.copy()
-        K_matrix[0, :] /= d  # fx, skew, cx
-        K_matrix[1, :] /= d  # fy, cy
+        # ``[::d]`` keeps pixel ``d j``: not a pure ``K / d`` (``stride_intrinsics``).
+        K_matrix = stride_intrinsics(K_matrix, d).astype(np.asarray(K_matrix).dtype)
 
         return image, masks, K_matrix, depth_map_z, pointmap, valid_mask, normals_map
 
@@ -1520,10 +1563,19 @@ class Sequence:
         masks = MaskDict({k: v[native_top:native_top + native_h:d,
                                native_left:native_left + native_w:d]
                           for k, v in raw_masks.items()}, shape=image.shape[:2])
-        # frame.K_matrix is for the strided crop; native/target carries it over.
-        K = frame.K_matrix.copy()
-        K[0, :] *= native_w / target_w
-        K[1, :] *= native_h / target_h
+        # K of THIS image, through the chain that made its pixels: undo the frame's stride
+        # and its crop-resize (per axis) back to the raw image, move to the native box,
+        # then this image's own stride (a ratio of sizes carries both the stride's offset
+        # and the box's rounding: up to ~0.3 px).
+        s_x, s_y, crop_left, crop_top = crop_resize_scales(raw_image.shape[:2],
+                                                           (target_h, target_w))
+        K = unstride_intrinsics(frame.K_matrix, d)
+        K[0, 0] /= s_x
+        K[0, 1] /= s_x
+        K[1, 1] /= s_y
+        K[0, 2] = (K[0, 2] + crop_left) / s_x - native_left
+        K[1, 2] = (K[1, 2] + crop_top) / s_y - native_top
+        K = stride_intrinsics(K, d).astype(np.asarray(frame.K_matrix).dtype)
         native_h, native_w = image.shape[:2]
 
         cap = self.native_resolution_max_scale * self.recon_resolution_set
@@ -1532,7 +1584,7 @@ class Sequence:
             cap_h, cap_w = max(1, int(round(native_h * cap_scale))), max(1, int(round(native_w * cap_scale)))
             image = cv2.resize(image, (cap_w, cap_h), interpolation=cv2.INTER_AREA)
             masks = MaskDict({k: cv2.resize(v.astype(np.uint8), (cap_w, cap_h),
-                                            interpolation=cv2.INTER_NEAREST).astype(bool)
+                                            interpolation=cv2.INTER_NEAREST_EXACT).astype(bool)
                               for k, v in masks.items()}, shape=(cap_h, cap_w))
             K[0, :] *= cap_w / native_w
             K[1, :] *= cap_h / native_h

@@ -722,7 +722,7 @@ class Inference:
 
                 # Run the generator with progress bar
                 # (skip ss_decoder / coord processing)
-                from tqdm import tqdm
+                from genia.core.utils.progress import tqdm
                 pbar = tqdm(
                     ss_generator.generate_iter(
                         latent_shape_dict,
@@ -1093,7 +1093,7 @@ class Inference:
                 )
 
                 # 11. Run generator (dynamics is monkey-patched above)
-                from tqdm import tqdm
+                from genia.core.utils.progress import tqdm
                 num_steps = slat_generator.inference_steps
                 ode_history = []  # [(t, {slat_mean: (8,), slat_norm_std: (1,)})]
                 slat_snapshots: list = []  # only populated when capture_slat_snapshots
@@ -1272,7 +1272,7 @@ class Inference:
         from sam3d_objects.model.backbone.tdfy_dit.models.structured_latent_flow import (
             SLatFlowModel,
         )
-        from tqdm import tqdm
+        from genia.core.utils.progress import tqdm
 
         pipeline = self._pipeline
         N = len(frames)

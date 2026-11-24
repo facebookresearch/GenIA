@@ -16,6 +16,8 @@ Each keeps its own licence; nothing here is relicensed by this project's `LICENS
 | `submodules/map-anything` (git submodule) | [facebookresearch/map-anything](https://github.com/facebookresearch/map-anything) | Apache-2.0 |
 | `submodules/actionmesh` (git submodule: the shapes of dynamic scenes) | [facebookresearch/ActionMesh](https://github.com/facebookresearch/ActionMesh) | **FAIR Noncommercial Research License** — noncommercial research only |
 | `submodules/actionmesh/third_party/TripoSG` (nested submodule) | [VAST-AI-Research/TripoSG](https://github.com/VAST-AI-Research/TripoSG) | MIT |
+| `submodules/sam3` (git submodule at `875ed6f`: the demo app's masks) | [facebookresearch/sam3](https://github.com/facebookresearch/sam3) | **SAM License** (Meta) |
+| `submodules/3DView` (git submodule at `29d9ff6`, v1.3.0: the demo app's 3D view) | [s-esposito/3DView](https://github.com/s-esposito/3DView) | MIT |
 
 The multi-view entropy weighting in `core/entropy.py` follows the formulation of
 [MV-SAM3D](https://github.com/devinli123/MV-SAM3D) (a SAM 3D Objects derivative,

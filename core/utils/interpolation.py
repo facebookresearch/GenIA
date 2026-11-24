@@ -759,16 +759,20 @@ def write_tapvid_tracks(out_dir, all_frame_indices, uv, xyz, vis, H, W, orig_hw=
     # evaluator un-crops the processed-pixel uv back to original-frame normalized
     # coords from STORED provenance — never re-deriving a preprocessing-specific crop
     # (survives swapping the reconstruction model).
-    from genia.core.utils.sequence import crop_resize_transform
+    from genia.core.utils.sequence import crop_resize_scales, crop_resize_transform
 
     oh, ow = (orig_hw if orig_hw is not None else (int(H), int(W)))
     scale, left, top, _, _ = crop_resize_transform((int(oh), int(ow)), (int(H), int(W)))
+    # The per-axis scales the image actually took (its sides are floored): a processed
+    # pixel un-crops through ``(u + left) / s_x``.
+    s_x, s_y, _, _ = crop_resize_scales((int(oh), int(ow)), (int(H), int(W)))
     frames = np.asarray([int(fi.frame) if hasattr(fi, "frame") else int(fi)
                          for fi in all_frame_indices], dtype=np.int64)
     path = os.path.join(out_dir, "tracks_2d.npz")
     np.savez(path, frames=frames, H=int(H), W=int(W),
              orig_hw=np.asarray([int(oh), int(ow)], dtype=np.int64),
              crop_scale=np.float64(scale),
+             crop_scale_xy=np.asarray([s_x, s_y], dtype=np.float64),
              crop_offset=np.asarray([int(left), int(top)], dtype=np.int64),
              **{f"obj_{oi}_uv": uv[oi].astype(np.float32) for oi in uv},
              **_obj_xyz_members(xyz),

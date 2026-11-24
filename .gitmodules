@@ -10,3 +10,9 @@
 	path = submodules/sam-3d-objects
 	url = https://github.com/facebookresearch/sam-3d-objects
 	ignore = dirty
+[submodule "submodules/sam3"]
+	path = submodules/sam3
+	url = https://github.com/facebookresearch/sam3
+[submodule "submodules/3DView"]
+	path = submodules/3DView
+	url = https://github.com/s-esposito/3DView

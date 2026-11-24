@@ -280,7 +280,7 @@ def invert_decoder(
     steps = range(num_steps)
     if show_progress:
         try:
-            from tqdm import tqdm
+            from genia.core.utils.progress import tqdm
             steps = tqdm(steps, desc=progress_desc, leave=False)
         except ImportError:
             pass

@@ -178,13 +178,14 @@ def _prepare_frame_targets(
         H0, W0 = int(m.shape[0]), int(m.shape[1])
         H, W = max(1, H0 // rs), max(1, W0 // rs)
         if rs > 1 and (H, W) != (H0, W0):
-            # mask + depth: nearest (preserve sharp edges / NaNs).
+            # mask + depth: nearest (preserve sharp edges / NaNs), the EXACT one: centre-
+            # aligned like the image's area resize (plain nearest is half a block off it).
             m = torch.nn.functional.interpolate(
-                m[None, None], size=(H, W), mode="nearest"
+                m[None, None], size=(H, W), mode="nearest-exact"
             )[0, 0]
             if d is not None:   # its own grid, which the render may exceed
                 d = torch.nn.functional.interpolate(
-                    d[None, None], mode="nearest",
+                    d[None, None], mode="nearest-exact",
                     size=(max(1, d.shape[0] // rs), max(1, d.shape[1] // rs)),
                 )[0, 0]
             # rgb: area downsample (anti-alias).  Channel-first for interp,
@@ -205,13 +206,13 @@ def _prepare_frame_targets(
         m_bool = m > 0.5
 
         K = f.get("render_K", f.get("K_matrix"))
-        if K is not None and rs > 1:
+        if K is not None and (H, W) != (H0, W0):
+            # A centre-aligned resize of corner-convention K: a pure per-axis scale (by
+            # the sizes the images took, which differ from 1 / rs when rs does not divide).
             K_arr = K.detach().cpu().numpy() if isinstance(K, torch.Tensor) else np.asarray(K)
             K_arr = K_arr.copy()
-            K_arr[0, 0] /= rs
-            K_arr[1, 1] /= rs
-            K_arr[0, 2] /= rs
-            K_arr[1, 2] /= rs
+            K_arr[0, :] *= W / W0
+            K_arr[1, :] *= H / H0
             K = torch.as_tensor(K_arr) if isinstance(K, torch.Tensor) else K_arr
 
         c2w = f.get("c2w")

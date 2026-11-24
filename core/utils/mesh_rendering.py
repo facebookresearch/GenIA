@@ -273,55 +273,8 @@ class PyTorch3DMeshRenderer:
 
 
 # ════════════════════════════════════════════════════════════════════════════
-# DiffMC + nvdiffrast differentiable rendering
+# nvdiffrast differentiable rendering
 # ════════════════════════════════════════════════════════════════════════════
-#
-# Differentiable pipeline: occupancy grid → DiffMC mesh → nvdiffrast render.
-
-
-def diffmc_mesh(occ_probs: torch.Tensor, device: torch.device):
-    """Extract a differentiable mesh from occupancy probabilities via DiffMC.
-
-    Pads the grid with a 1-voxel border of zeros and filters out the
-    boundary faces that DiffMC always generates.
-
-    Parameters
-    ----------
-    occ_probs : torch.Tensor
-        Occupancy probabilities ``(D, H, W)`` in ``[0, 1]``.
-    device : torch.device
-        Device for the DiffMC module.
-
-    Returns
-    -------
-    verts : torch.Tensor
-        Vertices ``(V, 3)`` in ``[-0.5, 0.5]³``.
-    faces : torch.Tensor
-        Triangle indices ``(F, 3)`` as int32 (nvdiffrast requirement).
-    """
-    from diso import DiffMC
-
-    padded = torch.nn.functional.pad(occ_probs, (1, 1, 1, 1, 1, 1), value=0.0)
-    dmc = DiffMC(dtype=torch.float32).to(device)
-    verts, faces = dmc(padded, isovalue=0.5)
-
-    orig_size = occ_probs.shape[0]
-    padded_size = padded.shape[0]
-    verts = (verts * padded_size - 1) / orig_size - 0.5
-
-    margin = 0.5 / orig_size
-    lo, hi = -0.5 - margin + 0.01, 0.5 + margin - 0.01
-    vert_inside = ((verts > lo) & (verts < hi)).all(dim=1)
-    face_inside = vert_inside[faces].all(dim=1)
-
-    kept_faces = faces[face_inside]
-    used_verts = torch.unique(kept_faces)
-    remap = torch.full((verts.shape[0],), -1, dtype=torch.long, device=device)
-    remap[used_verts] = torch.arange(used_verts.shape[0], device=device)
-    verts = verts[used_verts]
-    faces = remap[kept_faces].int()
-
-    return verts, faces
 
 
 def project_to_clip(
@@ -550,7 +503,6 @@ def apply_pose_p3d_to_r3(
 
 __all__ = [
     "PyTorch3DMeshRenderer",
-    "diffmc_mesh",
     "project_to_clip",
     "render_depth_and_alpha",
     "apply_pose_p3d_to_r3",

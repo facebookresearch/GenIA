@@ -21,7 +21,20 @@ from typing import Callable, Dict, List, Optional
 
 import numpy as np
 
-CACHE_VERSION = 1          # bump to invalidate every cache on a format change
+CACHE_VERSION = 2          # bump to invalidate every cache on a format change
+# 2 (2026-11-17): K is corner-convention (map-anything's predicted K +0.5 px,
+#   `index_grid_to_corner_K`).
+
+
+def index_grid_to_corner_K(K, sign: float = 1.0) -> np.ndarray:
+    """A K defined on the INTEGER pixel grid (the ray through index ``u`` is
+    ``(u - cx) / fx``, as map-anything builds and recovers it) in the corner convention,
+    where that ray belongs to the pixel's centre ``u + 0.5``: ``cx``, ``cy`` + 0.5.
+    ``sign=-1`` is the inverse, for a K handed TO such a model. Same rays, same depth."""
+    K = np.array(K, copy=True)
+    K[..., 0, 2] += 0.5 * sign
+    K[..., 1, 2] += 0.5 * sign
+    return K
 
 
 @dataclass
@@ -187,7 +200,8 @@ def run_cached(
     return results
 
 
-__all__ = ["ReconResult", "CACHE_VERSION", "cache_key", "run_cached"]
+__all__ = ["ReconResult", "CACHE_VERSION", "cache_key", "index_grid_to_corner_K",
+           "run_cached"]
 
 
 #: Datasets whose true intrinsics ``Sequence`` feeds map-anything as conditioning.

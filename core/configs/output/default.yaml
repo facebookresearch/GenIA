@@ -7,6 +7,7 @@ save_metrics: true
 save_cache: true
 suppress_intermediate_renders: false
 suppress_intermediate_metrics: false
+save_previews: null       # viewer previews (NN_{block}/{voxel_grid,splats}/, pose_cubes.glb): null = with the block's renders, true/false force
 render_decoded: true
 render_size: 512
 render_distance: 2.0

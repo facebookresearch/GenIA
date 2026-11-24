@@ -12,6 +12,8 @@
     python demo/run_demo.py image output.save_viz_orbit=false   # extra Hydra overrides pass through
     python demo/run_demo.py image --dry-run          # print the command instead of running it
     python demo/run_demo.py image --no-minimal-outputs   # also write every block's renders and metrics
+    python demo/run_demo.py image --data-root DIR --scene NAME   # your own scene: DIR/image/NAME/
+    python demo/run_demo.py image --low-vram         # fit a 24 GB GPU (default: auto)
 
 Each setting is one ``python -m genia.core`` call. None of the inputs carry depth or
 cameras, so map-anything predicts both. Results are written to
@@ -26,6 +28,11 @@ Dynamic scenes take their shapes from ActionMesh: per-frame meshes of one deform
 object, fitted into ``{scene}/actionmesh/`` by ``core/actionmesh_video.py`` on first use,
 are injected in place of SAM3D's shape prediction. ``--per-frame-shapes`` uses SAM3D's
 independent per-frame shapes instead (no canonical object, so no tracks or interpolation).
+
+``--low-vram`` gradient-checkpoints FINETUNE's decoder on every object, not only the large
+ones, at about twice FINETUNE's time: the image and multi-view demos then peak at ~16 GB
+instead of running out of memory on a 24 GB GPU. By default it is on when the GPU has
+less than ``LOW_VRAM_BELOW_GIB`` free.
 """
 import argparse
 import glob
@@ -51,6 +58,15 @@ MINIMAL_OUTPUTS = [
     "output.suppress_intermediate_renders=true",
     "output.suppress_intermediate_metrics=true",
 ]
+
+# Checkpoint FINETUNE's decoder whatever the object's size (the default only does from
+# 30k voxels, sized for 40 GB), and let the allocator grow segments instead of fragmenting.
+# `++` (add or override): `finetuning=none` has no such key, and must still compose.
+LOW_VRAM = ["++finetuning.decoder_checkpoint_min_voxels=0"]
+LOW_VRAM_ENV = {"PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True"}
+#: ``--low-vram`` defaults on below this much FREE GPU memory: an idle 24, 32 or 40 GB card,
+#: or a larger one that other processes already use.
+LOW_VRAM_BELOW_GIB = 44
 
 SETTINGS = {
     # One RGB image + instance mask: {scene}/0000.png + 0000_mask.png.
@@ -129,18 +145,34 @@ PER_FRAME_SHAPES = [
 ACTIONMESH_FRAMES = (16, 31)
 
 
-def scenes(setting):
-    root = os.path.join(DATA, setting)
+def scenes(setting, data_root=DATA):
+    root = os.path.join(data_root, setting)
+    if not os.path.isdir(root):
+        return []
     return sorted(d for d in os.listdir(root) if os.path.isdir(os.path.join(root, d)))
 
 
+def default_low_vram():
+    """Whether ``--low-vram`` is on when not given: under ``LOW_VRAM_BELOW_GIB`` free on the GPU.
+
+    Asked in a child process: a CUDA query in this one would keep a CUDA context (~400 MB)
+    on the GPU for the whole run.
+    """
+    query = "import torch; print(torch.cuda.mem_get_info()[0] if torch.cuda.is_available() else -1)"
+    out = subprocess.run([sys.executable, "-c", query], capture_output=True, text=True)
+    free = int(out.stdout.split()[-1]) if out.returncode == 0 else -1
+    return 0 <= free < LOW_VRAM_BELOW_GIB * 2**30
+
+
 def build_overrides(setting, scene=None, icp=False, extra=(), per_frame_shapes=False,
-                    minimal_outputs=True):
-    """The Hydra overrides of one demo run."""
+                    minimal_outputs=True, data_root=DATA, low_vram=False):
+    """The Hydra overrides of one demo run, on ``data_root/<setting>/<scene>/``."""
     spec = SETTINGS[setting]
     scene = scene or spec["default_scene"]
-    if scene not in scenes(setting):
-        raise ValueError(f"unknown {setting} scene {scene!r}; available: {scenes(setting)}")
+    root = os.path.join(os.path.abspath(data_root), setting)
+    if scene not in scenes(setting, data_root):
+        raise ValueError(f"unknown {setting} scene {scene!r} in {root}; "
+                         f"available: {scenes(setting, data_root)}")
     if icp and not spec["static"]:
         raise ValueError(f"--icp applies to the static settings (image, multiview), not {setting}")
     if per_frame_shapes and setting != "dynamic":
@@ -149,7 +181,7 @@ def build_overrides(setting, scene=None, icp=False, extra=(), per_frame_shapes=F
         *spec["overrides"],
         *NO_CACHE,
         *(MINIMAL_OUTPUTS if minimal_outputs else []),
-        f"dataset.path={os.path.join(DATA, setting)}",
+        f"dataset.path={root}",
         f"dataset.scene_name={scene}",
     ]
     if setting != "dynamic":
@@ -157,16 +189,17 @@ def build_overrides(setting, scene=None, icp=False, extra=(), per_frame_shapes=F
     elif per_frame_shapes:
         overrides += PER_FRAME_SHAPES
     else:
-        overrides += SHAPE_INJECTION + [
-            f"gt_shapes_inversion.gt_data_root={os.path.join(DATA, setting)}"]
+        overrides += SHAPE_INJECTION + [f"gt_shapes_inversion.gt_data_root={root}"]
     if spec["static"]:
         overrides += ["output.experiment_suffix=icp"] if icp else PHOTOMETRIC_REFINE
+    if low_vram:
+        overrides += LOW_VRAM
     return overrides + list(extra)
 
 
-def actionmesh_command(scene):
+def actionmesh_command(scene, data_root=DATA):
     """The command that fits ``scene``'s ActionMesh meshes, or None when they exist."""
-    scene_dir = os.path.join(DATA, "dynamic", scene)
+    scene_dir = os.path.join(os.path.abspath(data_root), "dynamic", scene)
     out_dir = os.path.join(scene_dir, "actionmesh")
     if glob.glob(os.path.join(out_dir, "obj_*", "mesh_*.glb")):
         return None
@@ -177,16 +210,22 @@ def actionmesh_command(scene):
             f"ActionMesh fits clips of {lo}-{hi} frames; {scene} has {n_frames}. "
             f"Use --per-frame-shapes, or trim the clip.")
     return [sys.executable, os.path.join(GENIA, "core", "actionmesh_video.py"),
-            "--input_path", os.path.join(DATA, "dynamic"), "--input_scene", scene,
+            "--input_path", os.path.dirname(scene_dir), "--input_scene", scene,
             "--input_stride", "1", "--input_length", str(n_frames),
             "--output_dir", out_dir]
 
 
-def main():
+def _parser():
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("setting", choices=sorted(SETTINGS))
-    parser.add_argument("--scene", help="scene under demo/data/<setting>/ (default: per setting)")
+    parser.add_argument("--scene", help="scene under <data-root>/<setting>/ (default: per setting)")
+    parser.add_argument("--data-root", default=DATA,
+                        help="directory holding <setting>/<scene>/, laid out like demo/data "
+                             "(default: demo/data)")
+    parser.add_argument("--low-vram", action=argparse.BooleanOptionalAction, default=None,
+                        help="checkpoint FINETUNE's decoder on every object, ~2x its time, to "
+                             f"fit a 24 GB GPU (default: on below {LOW_VRAM_BELOW_GIB} GiB free)")
     parser.add_argument("--icp", action="store_true",
                         help="static settings only: ICP pose refinement instead of the "
                              "per-frame appearance + photometric one")
@@ -196,20 +235,37 @@ def main():
                         help="skip the per-block renders, videos and metrics; final/ is always "
                              "written (default: on)")
     parser.add_argument("--dry-run", action="store_true", help="print the command(s) and exit")
-    args, extra = parser.parse_known_args()
+    return parser
 
+
+def plan(argv=None):
+    """One run of this script's command line ``argv``, without running it: ``(overrides,
+    env, stage)``, the ``python -m genia.core`` overrides, the environment they need and
+    the command staging the scene first (or None). For a host that runs the pipeline
+    itself, e.g. the demo app's warm worker. Raises ValueError on an unusable request."""
+    args, extra = _parser().parse_known_args(argv)
+    low_vram = default_low_vram() if args.low_vram is None else args.low_vram
+    overrides = build_overrides(args.setting, args.scene, args.icp, extra,
+                                args.per_frame_shapes, args.minimal_outputs,
+                                args.data_root, low_vram)
+    stage = (actionmesh_command(args.scene or SETTINGS["dynamic"]["default_scene"],
+                                args.data_root)
+             if args.setting == "dynamic" and not args.per_frame_shapes else None)
+    return overrides, (LOW_VRAM_ENV if low_vram else {}), stage
+
+
+def main():
+    parser = _parser()
+    args, _ = parser.parse_known_args()
     try:
-        overrides = build_overrides(args.setting, args.scene, args.icp, extra,
-                                    args.per_frame_shapes, args.minimal_outputs)
-        stage = (actionmesh_command(args.scene or SETTINGS["dynamic"]["default_scene"])
-                 if args.setting == "dynamic" and not args.per_frame_shapes else None)
+        overrides, env, stage = plan()
     except ValueError as exc:
         parser.error(str(exc))
     cmds = ([stage] if stage else []) + [[sys.executable, "-m", "genia.core", *overrides]]
     for cmd in cmds:
-        print(shlex.join(cmd), flush=True)
+        print(shlex.join([f"{k}={v}" for k, v in env.items()] + cmd), flush=True)
         if not args.dry_run:
-            rc = subprocess.run(cmd).returncode
+            rc = subprocess.run(cmd, env={**os.environ, **env}).returncode
             if rc:
                 return rc
     return 0

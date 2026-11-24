@@ -133,6 +133,7 @@ def run_preprocessing(cfg, frame_indices, view_indices, asset_indices, *, emit=T
 
     # Depth + cameras are in the Sequence, so the backend is done. Freed HERE, not left
     # to the GC: it is resident memory every later block would be charged for. See
-    # ModelCache.release_reconstruction_models.
-    ModelCache.get().release_reconstruction_models()
+    # ModelCache.release_reconstruction_models. Kept for a warm worker's next run.
+    if not cfg.processing.keep_recon_model:
+        ModelCache.get().release_reconstruction_models()
     return sequence

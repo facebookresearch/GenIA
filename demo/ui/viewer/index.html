@@ -1,0 +1,307 @@
+<!DOCTYPE html>
+<!-- Copyright (c) Meta Platforms, Inc. and affiliates. -->
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>3D viewer</title>
+    <!--
+      Host page for the 3DView viewer bundle (submodules/3DView), embedded in the
+      Gradio apps as an <iframe>. A real document rather than injected markup, so
+      the bundle's own <script>/<canvas> handling is untouched by Gradio.
+
+      Everything is driven by one query param, `manifest`: the URL of a JSON file
+      `{sources: HostToWebview[], done: bool}` the Python side (viewer.py)
+      rewrites as the run produces content. It is POLLED rather than baked into the
+      URL because the run grows a scene: the cameras appear after preprocessing and
+      the splats only at the end, and posting just the ids we have not posted before
+      ADDS them to the live scene — reloading this page with a longer `sources` list
+      would drop the decoded content and the viewpoint the user had set up.
+
+      Message shapes come from 3DView/core/src/shared/messages.ts:
+        {type:"loadColmap", id, label, format, urls:{cameras,images,points3d},
+         imageBaseUrl?}          -- point cloud + camera frustums, fetched by the
+                                    webview itself
+        {type:"addAsset", id, label, asset:{uri, name}}
+                                 -- mesh / 3DGS splat / tracks, by extension
+    -->
+    <style>
+      html, body { margin: 0; height: 100%; overflow: hidden; background: #1b1b1d;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif; }
+      canvas { display: block; position: fixed; top: 0; left: 0; }
+      /* The bundle looks up #status by id and toggles display flex/none. */
+      #status {
+        position: fixed; left: 50%; bottom: 18px; transform: translateX(-50%);
+        max-width: min(560px, calc(100vw - 32px));
+        display: flex; align-items: center; justify-content: center; text-align: center;
+        padding: 10px 16px; color: #e6e6e6; background: rgba(20, 20, 22, 0.72);
+        backdrop-filter: blur(12px) saturate(1.3);
+        border: 1px solid rgba(255, 255, 255, 0.12); border-radius: 12px;
+        font-size: 13px; line-height: 1.5; z-index: 100; pointer-events: none;
+      }
+      #status code { background: rgba(255,255,255,.1); padding: 1px 5px; border-radius: 4px; }
+      /* Scrollbars match the host app's (style.py, after 3DView's): a thin pill toned
+         with the text colour, on no track. Duplicated because this is a separate
+         document the host's stylesheet cannot reach. */
+      html { scrollbar-width: thin; scrollbar-color: rgba(225, 225, 225, .22) transparent; }
+      ::-webkit-scrollbar { width: 8px; height: 8px; }
+      ::-webkit-scrollbar-track, ::-webkit-scrollbar-corner { background: transparent; }
+      ::-webkit-scrollbar-thumb { border: 2px solid transparent; background: rgba(225, 225, 225, .22);
+        background-clip: content-box; border-radius: 99em; }
+      ::-webkit-scrollbar-thumb:hover { background: rgba(225, 225, 225, .38); background-clip: content-box; }
+      /* The panels are sized by their content, and the iframe is short (460px in
+         the results panel), so the stack — display controls, then the Scene list —
+         runs off the bottom and the lower half becomes unreachable. It is a
+         `position:fixed` column at top:12px, so cap it at the viewport minus both
+         insets and let it scroll. Wheel over the panel then scrolls it instead of
+         zooming the scene, which is what a cursor over a control panel should do. */
+      #viewer-ui {
+        max-height: calc(100vh - 24px);
+        overflow-y: auto;
+        overflow-x: hidden;
+        /* Room for the scrollbar even when it is not needed, so appearing/
+           disappearing does not shift the panels sideways. (`scrollbar-width` is
+           set globally above, for every scroller in this document.) */
+        scrollbar-gutter: stable;
+      }
+      /* The bundle's "3DView" panel (scene-wide display controls: Show /
+         Appearance / View) hidden on request from the embedding page. Only that
+         one — the "Scene" panel below it stays, since the item list is how a
+         visitor sees WHAT is loaded and toggles individual assets, which is
+         useful here; the display controls are the part that duplicates decisions
+         the pipeline already made.
+
+         Keyed off <body> rather than the panel itself: the bundle REBUILDS
+         #viewer-ui on every state change, so a class set on it would be dropped
+         the next time anything in the scene changed.
+
+         Selected by the header's aria-label (set from the panel title) rather
+         than by :first-child, so reordering the two panels cannot silently hide
+         the wrong one. If :has() is ever unavailable the rule simply drops and
+         the panel shows — degrading toward more UI, not a broken viewer. */
+      body.hide-ui .viewer-panel:has(> .viewer-header[aria-label="3DView panel"]) {
+        display: none;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="status">Loading viewer…</div>
+    <script>
+      (function () {
+        const q = new URLSearchParams(location.search);
+        const status = document.getElementById("status");
+        const fail = (m) => { status.style.display = "flex"; status.textContent = m; };
+
+        // Initial display-panel state, so the host's checkbox and this page agree
+        // without a round trip (`?ui=0` ⇔ box unchecked; gv.UI_DEFAULT is the one
+        // default both read). Set before the bundle builds #viewer-ui, so hiding
+        // the 3DView panel costs no flash of it appearing and then vanishing.
+        if (q.get("ui") === "0") document.body.classList.add("hide-ui");
+
+        // The bundle reads window.__viewerHost at startup and throws without it.
+        // Kept minimal: this host owns no scene state and offers no file picker,
+        // so "+" in the Scene panel is inert by design — the Python side decides
+        // what is loaded. saveImage still works (a normal browser download).
+        window.__viewerHost = {
+          postMessage(msg) {
+            if (msg && msg.type === "saveImage") {
+              const a = document.createElement("a");
+              a.href = msg.png;
+              a.download = msg.suggestedName || "view.png";
+              a.click();
+            }
+          },
+        };
+
+        // Requests from the embedding page. Messages, not query params, so acting
+        // on one never touches the iframe's src — reloading it would drop the
+        // loaded scene. The bundle's own listener ignores these types (its switch
+        // has no default case).
+        window.addEventListener("message", (e) => {
+          const msg = e.data;
+          if (!msg) return;
+          if (msg.type === "hostUi") {
+            // Hide the 3DView display panel (the Scene panel always stays);
+            // CSS keyed off <body>, see the styles above.
+            document.body.classList.toggle("hide-ui", !msg.show);
+          }
+        });
+
+        const manifest = q.get("manifest");
+        if (!manifest) { fail("No `manifest` parameter — nothing to load."); return; }
+
+        const POLL_MS = 1500;
+        const POSES_MS = 500;
+        const posted = new Set();
+        let pointsAsked = false;
+        let voxelGridId = null;   // the voxel-grid item now in the scene
+        let poseCubesId = null;   // the pose-cubes item, once in the scene
+        const placed = new Map(); // live-pose key (obj_i) -> its object-splats item now in the scene
+        let posesUrl = null;      // the run's live_poses file, once the manifest names it
+        let finished = false;     // the run is done: stop following its poses
+
+        // Display defaults for an embedded results view: the scene helpers are
+        // scaffolding here, and the depth cloud is the INPUT the splats were
+        // reconstructed from, so it goes once they land (added below).
+        //
+        // Driven through the panel's OWN checkboxes — the bundle exposes no host
+        // message for display state, but its UI is plain DOM in this document, and
+        // clicking an input runs the same `viewer.setGlobal(…)` a user click would.
+        // Each name is switched off EXACTLY ONCE (and only if still checked): after
+        // that the toggle belongs to whoever is looking at the scene, and
+        // re-asserting it on every panel rebuild would stop them turning it back on.
+        const switchOff = new Set(["Grid", "Axes", "Box"]);
+        function applySwitchOff() {
+          for (const name of switchOff) {
+            const row = [...document.querySelectorAll("#viewer-ui .viewer-row")]
+              .find((r) => r.textContent.trim().startsWith(name));
+            const box = row && row.querySelector("input[type=checkbox]");
+            if (!box) continue; // that row is not rendered yet — panelWatch retries
+            if (box.checked) box.click();
+            switchOff.delete(name);
+          }
+        }
+        // A row exists only while the content it controls does — Box needs a model,
+        // Points a cloud — and the panel REBUILDS #viewer-ui on every scene change,
+        // so the checkbox we want is rarely there the first time we look.
+
+        // The voxel-grid preview is a Scene-panel ITEM, not a 3DView checkbox row
+        // like Grid/Axes/Box/Points above, so it needs its own path: each Scene item
+        // is a `.viewer-scene-item` whose FIRST child is a per-item
+        // `button.viewer-iconbtn` (title "Hide"/"Show", built by the bundle's
+        // visibilityToggle()) rather than an `input[type=checkbox]`. Same "ask once,
+        // then leave it to whoever is looking" rule as Points, just a different
+        // control to drive. This label MUST match demo/ui/viewer.py's
+        // VOXEL_GRID_LABEL — nothing here reads it from the manifest.
+        const VOXEL_GRID_LABEL = "voxel grid";
+        let voxelGridReady = false; // true once the manifest says splats are up (preview or final)
+        let voxelGridAsked = false; // true once handled — hidden, or found already hidden
+        function applyHideVoxelGrid() {
+          if (!voxelGridReady || voxelGridAsked) return;
+          for (const item of document.querySelectorAll("#viewer-ui .viewer-scene-item")) {
+            const label = item.querySelector(".label");
+            if (!label || label.textContent !== VOXEL_GRID_LABEL) continue;
+            const toggle = item.querySelector("button.viewer-iconbtn");
+            if (toggle && toggle.title === "Hide") toggle.click(); // still visible — hide it
+            voxelGridAsked = true; // found it: stop retrying, don't fight the user either way
+            return;
+          }
+          // Not rendered yet — the MutationObserver below retries.
+        }
+
+        // A newer preview (voxel grid, or an object's splats) replaces the previous one:
+        // the bundle takes no "remove" message from a host, so its own Remove button on
+        // the old item's row is clicked, the same way the toggles above are driven. Done
+        // just before the new one is posted, so only the old row carries the label yet.
+        function removeItems(labels) {
+          for (const item of document.querySelectorAll("#viewer-ui .viewer-scene-item")) {
+            const label = item.querySelector(".label");
+            if (!label || !labels.includes(label.textContent)) continue;
+            const remove = item.querySelector('button.viewer-iconbtn[title="Remove"]');
+            if (remove) remove.click();
+          }
+        }
+        // The pose cubes move by node like the voxel grid, and stay shown throughout.
+        // MUST match demo/ui/viewer.py's POSE_CUBES_LABEL.
+        const POSE_CUBES_LABEL = "pose cubes";
+        // FINAL's objects replace every object's preview splats (the same Gaussians).
+        // MUST match the label demo/ui/viewer.py's _splat_sources gives FINAL's world splats.
+        const FINAL_OBJECTS_LABEL = "objects";
+        const previewLabels = new Set(); // labels of the object-splats items posted so far
+
+        new MutationObserver(() => { applySwitchOff(); applyHideVoxelGrid(); })
+          .observe(document.body, { childList: true });
+
+        // One pass over the manifest: post what is new, then schedule the next
+        // poll unless the run says it is finished. Every failure mode (the file
+        // not written yet, a 404, a torn read) is just "try again shortly".
+        async function poll() {
+          let done = false;
+          try {
+            const sep = manifest.includes("?") ? "&" : "?";
+            const res = await fetch(manifest + sep + "t=" + Date.now(), { cache: "no-store" });
+            if (res.ok) {
+              const data = await res.json();
+              for (const msg of data.sources || []) {
+                if (msg && msg.id && !posted.has(msg.id)) {
+                  posted.add(msg.id);
+                  if (msg.label === VOXEL_GRID_LABEL) {
+                    removeItems([VOXEL_GRID_LABEL]);
+                    voxelGridId = msg.id;
+                    voxelGridAsked = false;   // a new item: hidden too, if splats are up
+                  } else if (msg.label === POSE_CUBES_LABEL) {
+                    poseCubesId = msg.id;
+                  } else if (msg.livePose) {        // an object's preview splats
+                    removeItems([msg.label]);
+                    previewLabels.add(msg.label);
+                    placed.set(msg.livePose, msg.id);
+                  } else if (msg.label === FINAL_OBJECTS_LABEL) {
+                    removeItems([...previewLabels]);
+                    placed.clear();
+                  }
+                  window.postMessage(msg, "*");
+                }
+              }
+              if (data.hidePoints && !pointsAsked) {
+                pointsAsked = true; // ask once, however many polls repeat it
+                switchOff.add("Points");
+                applySwitchOff(); // panelWatch retries if the row is not up yet
+              }
+              if (data.hideVoxelGrid) {
+                voxelGridReady = true;
+                applyHideVoxelGrid(); // MutationObserver retries if not up yet
+              }
+              done = !!data.done;
+              if (data.livePoses && !posesUrl) {
+                posesUrl = data.livePoses;
+                pollPoses();
+              }
+            }
+          } catch (e) { /* not written yet, or the server hiccuped — retry */ }
+          finished = done;
+          if (!done) setTimeout(poll, POLL_MS);
+        }
+
+        // Each object's placement while its pose is being optimised (the run's live_poses
+        // file): its nodes in the voxel-grid and pose-cubes items and its preview-splats
+        // item go there, so all of them move with the object. Sent every pass, not only on
+        // change: an item still loading ignores it, and the next pass catches up (an
+        // unchanged one costs nothing).
+        async function pollPoses() {
+          try {
+            const res = await fetch(posesUrl + "?t=" + Date.now(), { cache: "no-store" });
+            if (res.ok && (voxelGridId || poseCubesId || placed.size)) {
+              const data = await res.json();
+              for (const [node, matrix] of Object.entries(data.objects || {})) {
+                for (const id of [voxelGridId, poseCubesId]) {
+                  if (id) window.postMessage({ type: "setTransform", id, node, matrix }, "*");
+                }
+                if (placed.has(node)) {
+                  window.postMessage({ type: "setTransform", id: placed.get(node), matrix }, "*");
+                }
+              }
+            }
+          } catch (e) { /* not written yet — retry */ }
+          if (!finished) setTimeout(pollPoses, POSES_MS);
+        }
+
+        const bundle = q.get("bundle");
+        if (!bundle) { fail("No `bundle` parameter — viewer bundle URL missing."); return; }
+
+        const script = document.createElement("script");
+        script.src = bundle;
+        script.onerror = () => fail(
+          "Could not load the viewer bundle. Build submodules/3DView (see install.sh) " +
+          "or point DEMO_VIEWER_DIST at a dist/ containing webview.js."
+        );
+        // The bundle posts {type:"ready"} through __viewerHost once it is listening.
+        // Rather than depend on that ordering, start polling after its script has
+        // executed — the webview installs its message listener synchronously at
+        // startup, so the first sources cannot be posted into a void. The panel is
+        // built during that same execution, so Grid/Axes can be switched off now.
+        script.onload = () => { applySwitchOff(); poll(); };
+        document.body.appendChild(script);
+      })();
+    </script>
+  </body>
+</html>

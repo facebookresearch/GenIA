@@ -43,6 +43,7 @@ from genia.core.utils.config import (
     get_block_output_flag, block_output_subdir,
 )
 from genia.core.utils.pipeline_state import get_pipeline_cache_dir, load_pipeline_cache
+from genia.core.utils import progress
 from genia.core.utils.console import block_header
 from genia.core.utils.evaluation import (
     capture_before,
@@ -544,6 +545,7 @@ def run_gt_shapes_inversion(cfg, state, sequence, pipeline_obj, device):
     for obj_idx, tokens_list in state.tokens_by_object.items():
         if obj_idx == 0:
             continue  # background has no GT mesh
+        progress.set_object(obj_idx)   # its shape-inversion bars are this object's
 
         if mode == "per_frame_meshes":
             # GSO: single static mesh reused across all frames (1-frame
@@ -1153,6 +1155,7 @@ def run_shape_and_poses_init(cfg, state, sequence, inference, pipeline_obj, eval
 
     for obj_idx in sorted(state.tokens_by_object.keys()):
         print(f"\n  Object {obj_idx}:")
+        progress.set_object(obj_idx)   # its Stage 1 bars are this object's
 
         if strategy == "parallel":
             # Get canonical shape latent.  Priority order:
@@ -1834,7 +1837,7 @@ def run_appearance_init(cfg, state, sequence, inference, pipeline_obj, evaluator
         return
 
     import torch
-    from tqdm import tqdm
+    from genia.core.utils.progress import tqdm
 
     strategy = ai_cfg.strategy
 
@@ -1957,6 +1960,7 @@ def run_appearance_init(cfg, state, sequence, inference, pipeline_obj, evaluator
 
     for obj_idx in sorted(target_obj_indices):
         tokens_list = state.tokens_by_object[obj_idx]
+        progress.set_object(obj_idx)   # its Stage 2 bars are this object's
 
         if strategy == "perframe":
             # Re-run Stage 2 per-frame. Each frame's own existing SLAT coords
@@ -1982,9 +1986,7 @@ def run_appearance_init(cfg, state, sequence, inference, pipeline_obj, evaluator
                      f"rendering_guidance={ai_cfg.rendering_guidance_active}"
                      if _use_stage2 else "") + ")")
             perframe_slats = []
-            for frame_idx, decoder_input in tqdm(
-                tokens_list, desc=f"  Obj {obj_idx} perframe appearance"
-            ):
+            for frame_idx, decoder_input in tqdm(tokens_list, desc="  Per-frame appearance"):
                 coords = _perframe_voxel_coords(state, obj_idx, decoder_input, device)
                 if coords is None:
                     raise RuntimeError(

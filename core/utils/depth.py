@@ -25,11 +25,14 @@ def pinhole_xy(u, v, z, K):
     is what lets a RENDERED depth map be unprojected inside a pose-optimisation loop by the
     same code that unprojects an observed one.
 
-    Pixel coordinates are INTEGER (no +0.5 half-pixel offset).  It is the convention the
-    GT clouds, the rendered clouds and every stored pointmap share, and changing it would
-    shift all of them by half a pixel at once.
+    ``u, v`` are pixel INDICES; the ray goes through the pixel's CENTRE, ``u + 0.5``,
+    because ``K`` is corner-convention as gsplat renders it (pixel ``i`` spans
+    ``[i, i + 1)``; a GT camera's principal point at ``W / 2``) and every backend's K is
+    brought to it on ingestion.  Until 2026-11-17 the ray went through ``u`` itself, half
+    a pixel up-left of the image the depth came from.  A continuous projected coordinate
+    is looked up with ``floor``, the inverse.
     """
-    return (u - K[0, 2]) * z / K[0, 0], (v - K[1, 2]) * z / K[1, 1]
+    return (u + 0.5 - K[0, 2]) * z / K[0, 0], (v + 0.5 - K[1, 2]) * z / K[1, 1]
 
 
 def unproject_z_depth(depth, keep, K, uu, vv):
@@ -240,7 +243,7 @@ def load_and_process_depth(
             fx, fy, cx, cy = K_ms[0, 0], K_ms[1, 1], K_ms[0, 2], K_ms[1, 2]
             if depth_map.shape != (H, W):
                 import cv2
-                depth_map = cv2.resize(depth_map, (W, H), interpolation=cv2.INTER_NEAREST)
+                depth_map = cv2.resize(depth_map, (W, H), interpolation=cv2.INTER_NEAREST_EXACT)
             depth_map_z = depth_map.astype(np.float32)
             valid_mask = depth_map_z > 0
             depth_map_z[~valid_mask] = 0.0

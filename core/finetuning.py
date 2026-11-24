@@ -22,7 +22,8 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
-from tqdm import tqdm
+from genia.core.utils import live_poses, progress
+from genia.core.utils.progress import tqdm
 
 from genia.core.utils.config import (
     LossConfig, PipelineConfig,
@@ -634,8 +635,8 @@ def _flag_visible_by_depth(
     x, y, z = xyz[:, 0], xyz[:, 1], xyz[:, 2]
     eps = 1e-6
     zc = z.clamp_min(eps)
-    u = (fx * x / zc + cx).round().long()
-    v = (fy * y / zc + cy).round().long()
+    u = torch.floor(fx * x / zc + cx).long()     # the pixel it falls in
+    v = torch.floor(fy * y / zc + cy).long()
     in_view = (z > eps) & (u >= 0) & (u < W) & (v >= 0) & (v < H)
     uc = u.clamp(0, W - 1)
     vc = v.clamp(0, H - 1)
@@ -1501,9 +1502,10 @@ def _finetune_single_object(
     best_iter = 0
     frame_sampler = EpochFrameSampler(frame_indices)
 
+    progress.set_object(obj_idx)
     pbar = tqdm(
         range(effective_num_iterations),
-        desc=f"  Finetune obj {obj_idx}",
+        desc="  Finetune",
         leave=True,
         disable=effective_num_iterations == 0,
     )
@@ -1649,6 +1651,12 @@ def _finetune_single_object(
         optimizer.step()
         if scheduler is not None:
             scheduler.step()
+
+        if live_poses.due() and (_fk := live_poses.anchor(obj_idx)) in poses:
+            with torch.no_grad():
+                _pose = snapshot_poses_with_correction({_fk: poses[_fk]}, _root_delta)[_fk]
+            live_poses.record(obj_idx, _fk, _pose["rotation"], _pose["translation"], _pose["scale"])
+            live_poses.flush()
 
         # Save per-pixel debug plot every 50 iterations
         if want_pixelwise and px_data:

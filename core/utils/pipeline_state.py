@@ -9,6 +9,7 @@ mid-pipeline.
 """
 from __future__ import annotations
 
+import json
 import os
 from dataclasses import dataclass, field
 from typing import Any, Optional
@@ -940,14 +941,38 @@ def get_pipeline_cache_dir(output_dir: str) -> str:
     return os.path.join(os.path.dirname(output_dir), "cache")
 
 
-def save_pipeline_cache(state: PipelineState, block_name: str, cache_dir: str) -> None:
-    """Serialize *state* after *block_name* completes."""
+def block_cache_keys(cfg, blocks) -> dict:
+    """``{block: key}`` for ``processing.block_cache_keyed``: a hash of the resolved config
+    without ``output`` (where a run writes, not what it computes) and without the sections
+    of the blocks after ``block`` (``blocks`` = ``manifest.BLOCKS``, in run order)."""
+    import hashlib
+    from omegaconf import OmegaConf
+
+    config = OmegaConf.to_container(cfg, resolve=True)
+    config.pop("output", None)
+    keys = {}
+    for i, (block, _section) in enumerate(blocks):
+        later = {section for _block, section in blocks[i + 1:]}
+        upto = {k: v for k, v in config.items() if k not in later}
+        text = json.dumps(upto, sort_keys=True, default=str)
+        keys[block] = hashlib.sha256(text.encode()).hexdigest()[:16]
+    return keys
+
+
+def _cache_file(block_name: str, key: str | None) -> str:
+    return f"{block_name}.{key}.pt" if key else f"{block_name}.pt"
+
+
+def save_pipeline_cache(state: PipelineState, block_name: str, cache_dir: str,
+                        key: str | None = None) -> None:
+    """Serialize *state* after *block_name* completes (as ``{block}.{key}.pt`` given a
+    ``key``, see :func:`block_cache_keys`)."""
     import torch
 
     os.makedirs(cache_dir, exist_ok=True)
     data = {k: _serialize_value(v) for k, v in state.__dict__.items()
             if k != "pipeline_obj"}
-    path = os.path.join(cache_dir, f"{block_name}.pt")
+    path = os.path.join(cache_dir, _cache_file(block_name, key))
     torch.save(data, path)
     print(f"  Pipeline cache saved: {path}")
 
@@ -990,10 +1015,12 @@ def load_pipeline_cache(path: str, cls: type = PipelineState) -> PipelineState:
     return cls(**kwargs)
 
 
-def find_latest_pipeline_cache(cache_dir: str, active_blocks: list) -> tuple | None:
-    """Scan *active_blocks* from last→first, return ``(block_name, path)`` or ``None``."""
+def find_latest_pipeline_cache(cache_dir: str, active_blocks: list,
+                               keys: dict | None = None) -> tuple | None:
+    """Scan *active_blocks* from last→first, return ``(block_name, path)`` or ``None``;
+    given ``keys`` (:func:`block_cache_keys`), only a cache under its block's key counts."""
     for block_name in reversed(active_blocks):
-        path = os.path.join(cache_dir, f"{block_name}.pt")
+        path = os.path.join(cache_dir, _cache_file(block_name, (keys or {}).get(block_name)))
         if os.path.isfile(path):
             return (block_name, path)
     return None
@@ -1003,6 +1030,7 @@ __all__ = [
     "PipelineState",
     "get_pipeline_cache_dir",
     "save_pipeline_cache",
+    "block_cache_keys",
     "load_pipeline_cache",
     "load_pipeline_cache_raw",
     "gaussian_blob_to_render_tensors",

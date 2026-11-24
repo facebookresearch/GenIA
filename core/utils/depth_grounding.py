@@ -164,7 +164,7 @@ def _mask_center_scale(mask, d_med, K, center_fallback, scale_fallback):
     h = (rmax - rmin) / fy * d
     scale = np.float32(max(w, h))
     # bbox-center pixel → P3D (X-left, Y-up: negate the R3 x,y offsets).
-    uc, vc = 0.5 * (cmin + cmax), 0.5 * (rmin + rmax)
+    uc, vc = 0.5 * (cmin + cmax) + 0.5, 0.5 * (rmin + rmax) + 0.5   # pixel centres
     center = np.array([-(uc - cx) / fx * d, -(vc - cy) / fy * d, d],
                       dtype=np.float32)
     return center, scale

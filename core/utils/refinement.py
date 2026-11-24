@@ -15,7 +15,8 @@ import random
 
 import numpy as np
 import torch
-from tqdm import tqdm
+from genia.core.utils import live_poses, progress
+from genia.core.utils.progress import tqdm
 from .quaternion_ops import (
     matrix_to_quaternion,
     p3d_to_r3_positions,
@@ -636,11 +637,11 @@ def _match_depth_grid(
     src = rendered.float() if was_bool else rendered
     if src.dim() == 2:
         rendered_d = F.interpolate(
-            src[None, None], size=gt_hw, mode="nearest",
+            src[None, None], size=gt_hw, mode="nearest-exact",
         )[0, 0]
     else:
         rendered_d = F.interpolate(
-            src.permute(2, 0, 1)[None], size=gt_hw, mode="nearest",
+            src.permute(2, 0, 1)[None], size=gt_hw, mode="nearest-exact",
         )[0].permute(1, 2, 0)
     if was_bool:
         rendered_d = rendered_d.bool()
@@ -654,7 +655,7 @@ def _match_depth_grid(
     mask_d = None
     if mask is not None:
         mask_d = F.interpolate(
-            mask.float()[None, None], size=gt_hw, mode="nearest",
+            mask.float()[None, None], size=gt_hw, mode="nearest-exact",
         )[0, 0].bool()
 
     return rendered_d, K_d, mask_d
@@ -1370,8 +1371,8 @@ def depth_to_normals(
     fx, fy = K_matrix[0, 0], K_matrix[1, 1]
     cx, cy = K_matrix[0, 2], K_matrix[1, 2]
 
-    x_norm = (u_coords - cx) / fx
-    y_norm = (v_coords - cy) / fy
+    x_norm = (u_coords + 0.5 - cx) / fx      # pixel centres, as ``depth.pinhole_xy``
+    y_norm = (v_coords + 0.5 - cy) / fy
 
     # Unproject z-depth to 3D camera-space points via pinhole model
     points = torch.stack([x_norm * depth, y_norm * depth, depth], dim=-1)
@@ -2249,6 +2250,9 @@ def refine_pose_for_frame(
             cur_rotation = opt_rotation
             cur_translation = opt_translation
             cur_scale = opt_scale
+        if live_poses.due():   # the pose the last step left
+            live_poses.record(obj_idx, frame_idx, cur_rotation, cur_translation, cur_scale)
+            live_poses.flush()
 
         # Render frame with current pose
         rgb, alpha, depth = renderer.render(
@@ -3241,6 +3245,24 @@ def refine_poses_global_composite(
         total_loss.backward()
         optimizer.step()
 
+        if live_poses.due():   # each object's current pose, as the render loop above builds it
+            with torch.no_grad():
+                for obj_idx in all_obj_indices:
+                    fk = live_poses.anchor(obj_idx)
+                    if use_pose_tokens_per_obj.get(obj_idx, False) and fk in opt_6drots.get(obj_idx, {}):
+                        _, cur_rot, cur_trans, _ = differentiable_pose_decode(
+                            opt_6drots[obj_idx][fk], opt_raw_trans[obj_idx][fk],
+                            frozen_raw_scales[obj_idx][fk], scene_scales_all[obj_idx][fk],
+                            scene_shifts_all[obj_idx][fk], downsample_factors_all[obj_idx][fk])
+                    elif fk in opt_rotations.get(obj_idx, {}):
+                        cur_rot, cur_trans = opt_rotations[obj_idx][fk], opt_translations[obj_idx][fk]
+                    else:
+                        continue
+                    live_poses.record(obj_idx, fk, *_apply_gs_correction(
+                        opt_delta_aa.get(obj_idx), opt_delta_logs.get(obj_idx),
+                        opt_delta_t.get(obj_idx), cur_rot, cur_trans, opt_global_scale[obj_idx]))
+                live_poses.flush()
+
         # Save per-pixel debug plot every 50 iterations
         if want_pixelwise and px_data:
             from .visualization import save_pixelwise_loss_plot
@@ -3959,10 +3981,10 @@ def refine_poses_shared_world_for_sequence(
           f"{losses.num_iterations} iters/obj")
 
     # ── Optimization loop (per-object, independent) ──────────────────
-    total_steps = losses.num_iterations * len(obj_setup)
-    pbar = tqdm(total=total_steps, desc="  Shared-world refine", leave=True, ncols=120)
     for obj_idx, setup in obj_setup.items():
-        pbar.set_description(f"  obj {obj_idx}")
+        progress.set_object(obj_idx)   # one bar per object
+        pbar = tqdm(total=losses.num_iterations, desc="  Shared-world refine", leave=True,
+                    ncols=120)
         chamfer_model_idx = (
             _chamfer_model_subsample_idx(
                 setup["renderer"].num_model_points(),
@@ -3995,6 +4017,13 @@ def refine_poses_shared_world_for_sequence(
             # commuting note at the parameter setup).
             R_ref, t_ref, s_ref = _apply_shared_correction(
                 setup["delta"], R_ref, t_ref, s_ref)
+
+            # The pose the last step left, as each frame derives it.
+            if live_poses.due() and (_fk := live_poses.anchor(obj_idx)) in setup["c2w_rebase"]:
+                with torch.no_grad():
+                    live_poses.record(obj_idx, _fk, *derive_perframe_pose_from_shared_decoded(
+                        R_ref, t_ref, s_ref, setup["c2w_rebase"][_fk]))
+                live_poses.flush()
 
             sum_rgb = torch.zeros((), device=device)
             sum_ssim = torch.zeros((), device=device)
@@ -4164,7 +4193,8 @@ def refine_poses_shared_world_for_sequence(
                     tuple(None if _x is None else _x.detach().clone() for _x in _d),
                 )
             pbar.update(1)
-    pbar.close()
+        pbar.close()
+    progress.set_object(None)
 
     # ── Write-back: apply best state, propagate via rebase ──────────
     refined_tokens: Dict[int, List[Tuple[int, Dict[str, Any]]]] = {}
@@ -4414,15 +4444,6 @@ def refine_poses_for_sequence(
     print("\n  Refining per-frame poses with differentiable rendering...")
 
     refined_tokens = {}
-    total_frames = sum(len(tl) for tl in tokens_by_object.values())
-    n_objects = len(tokens_by_object)
-    pbar = tqdm(
-        total=total_frames,
-        desc="  Per-frame refine",
-        leave=True,
-        ncols=120,
-        bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} frames [{elapsed}<{remaining}]",
-    )
 
     # One adapter per distinct render source, not per frame: a single canonical
     # Gaussian is shared by every frame.  Keying on `id` is safe here because every
@@ -4437,6 +4458,14 @@ def refine_poses_for_sequence(
 
     for obj_idx in sorted(tokens_by_object.keys()):
         refined_tokens[obj_idx] = []
+        progress.set_object(obj_idx)   # one bar per object, over its frames
+        pbar = tqdm(
+            total=len(tokens_by_object[obj_idx]),
+            desc="  Per-frame refine",
+            leave=True,
+            ncols=120,
+            bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} frames [{elapsed}<{remaining}]",
+        )
 
         # An object with no Gaussians passes its tokens through unrefined; one with
         # Gaussians for most frames SKIPS the frames that failed to decode.
@@ -4449,13 +4478,10 @@ def refine_poses_for_sequence(
         if not has_gaussians:
             refined_tokens[obj_idx].extend(tokens_by_object[obj_idx])
             pbar.update(len(tokens_by_object[obj_idx]))
+            pbar.close()
             continue
 
         for frame_idx, decoder_input in tokens_by_object[obj_idx]:
-            desc = (f"  obj {obj_idx} f{frame_idx}" if n_objects > 1
-                    else f"  frame {frame_idx}")
-            pbar.set_description(desc)
-
             # Resolve the render source for this (obj, frame)
             if per_frame_canonical:
                 if frame_idx not in obj_gaussians:
@@ -4541,8 +4567,8 @@ def refine_poses_for_sequence(
 
             refined_tokens[obj_idx].append((frame_idx, refined_decoder_input))
             pbar.update(1)
-
-    pbar.close()
+        pbar.close()
+    progress.set_object(None)
     return refined_tokens
 
 

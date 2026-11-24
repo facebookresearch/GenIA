@@ -779,6 +779,7 @@ def _icp_delta_closed_form(frames, sigma: float, steps: int, device, *,
     """
     import torch
 
+    from genia.core.utils import live_poses
     from genia.core.utils.timing import get_timer
     from genia.core.utils.pose_params import natives_to_freeze
     from genia.core.utils.refinement import (
@@ -865,6 +866,14 @@ def _icp_delta_closed_form(frames, sigma: float, steps: int, device, *,
 
     with torch.no_grad():
         for it in range(int(steps)):
+            if live_poses.due():   # the pose the last increment left
+                _fk = live_poses.anchor(debug_obj_idx)
+                for k, f in enumerate(frames):
+                    if f.get("fk") == _fk:
+                        R_row, s_k, t_k = _posed(k)
+                        live_poses.record(debug_obj_idx, _fk, R_row, t_k, s_k)
+                        break
+                live_poses.flush()
             nu = _gnc_nu(it, int(steps), gnc_from, gnc_to)
             blocks, per_frame_res, n_rows, gates = [], [], 0, []
             for k, (f, renderer) in enumerate(zip(frames, renderers)):

@@ -1332,15 +1332,16 @@ def overlay_trails(frame: np.ndarray, trails: np.ndarray | None, upto: int,
 
 def scale_intrinsics(K: np.ndarray, src_hw: tuple[int, int],
                      dst_hw: tuple[int, int]) -> np.ndarray:
-    """Rescale a 3x3 K between resolutions (pixel-center convention)."""
+    """Rescale a 3x3 K between resolutions (corner convention, as gsplat renders and
+    every run's K is: a pure per-axis scale)."""
     if src_hw == dst_hw:
         return K
     sy, sx = dst_hw[0] / src_hw[0], dst_hw[1] / src_hw[1]
     out = np.asarray(K, dtype=np.float32).copy()
     out[0, 0] *= sx
     out[1, 1] *= sy
-    out[0, 2] = (out[0, 2] + 0.5) * sx - 0.5
-    out[1, 2] = (out[1, 2] + 0.5) * sy - 0.5
+    out[0, 2] *= sx
+    out[1, 2] *= sy
     return out
 
 
@@ -1348,8 +1349,8 @@ def centred_intrinsics(focal: float, W: int, H: int) -> np.ndarray:
     """K for a ``W x H`` canvas: one focal on both axes (square pixels), principal
     point at the centre.  Sole owner of that centring convention, so the fitted
     renders cannot disagree with :func:`fit_focal` about where the axis is."""
-    return np.array([[focal, 0.0, (W - 1) * 0.5],
-                     [0.0, focal, (H - 1) * 0.5],
+    return np.array([[focal, 0.0, W * 0.5],
+                     [0.0, focal, H * 0.5],
                      [0.0, 0.0, 1.0]], np.float32)
 
 
