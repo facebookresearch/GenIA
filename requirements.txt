@@ -50,7 +50,7 @@ fire==0.7.1
 pccm==0.4.16
 # map-anything and uniception (installed --no-deps by install.sh): their runtime imports.
 natsort==8.4.0
-orjson==3.10.0
+orjson==3.11.6
 pillow-heif==1.2.0
 python-box==7.3.2
 requests==2.32.5
