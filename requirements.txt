@@ -65,7 +65,7 @@ typeguard==4.4.4
 gsconverter @ git+https://github.com/francescofugazzi/3dgsconverter.git@99bec766bb074d49da89614d077fba58fdd843ae
 # The demo app (demo/app.py) and its SAM3 masks (submodules/sam3, installed --no-deps by
 # install.sh: SAM3 pins ftfy 6.1.1 and lists pycocotools only as a dev extra).
-gradio==5.49.0
+gradio==6.16.0
 ftfy==6.2.0
 iopath==0.1.10
 pycocotools==2.0.11
