@@ -15,9 +15,6 @@ import warnings
 # torch.cuda imports the deprecated pynvml package — silence its FutureWarning.
 warnings.filterwarnings("ignore", message=r"The pynvml package is deprecated.*")
 
-# Skip sam3d_objects heavyweight initialization (must be set before any utils import)
-os.environ["LIDRA_SKIP_INIT"] = "1"
-
 import hydra  # noqa: E402
 from omegaconf import DictConfig, OmegaConf  # noqa: E402
 
@@ -220,11 +217,42 @@ def _remove_empty_dirs(path: str) -> None:
             os.rmdir(root)
 
 
+def check_backbone() -> None:
+    """Stop, saying why, when the ``sam3d_objects`` a run would import is not this checkout's
+    patched copy (``submodules/sam-3d-objects`` with ``sam-3d-objects.patch``, applied by
+    ``install.sh``). Another copy earlier on ``sys.path``, e.g. SAM 3D Objects installed into
+    the environment by its own instructions, wins over ours (appended, see above), and an
+    unpatched one fails on imports the patch fixes (``utils3d``'s renamed functions: GitHub
+    issue #6). For the CLI only: a host process putting its own fork first does so on purpose."""
+    import importlib.util
+    import subprocess
+    from pathlib import Path
+
+    spec = importlib.util.find_spec("sam3d_objects")
+    found = Path(spec.origin).resolve().parents[1] if spec and spec.origin else None
+    if found != SAM3D_OBJECTS_ROOT.resolve():
+        sys.exit(f"sam3d_objects would be imported from {found}, not from this checkout's "
+                 f"patched copy {SAM3D_OBJECTS_ROOT}. Uninstall it from this environment "
+                 "(pip uninstall sam3d_objects) or take it off PYTHONPATH, then run again.")
+    patch = SAM3D_OBJECTS_ROOT.parent / "sam-3d-objects.patch"
+    try:
+        applied = subprocess.run(["git", "-C", str(SAM3D_OBJECTS_ROOT), "apply", "--reverse",
+                                  "--check", str(patch)], capture_output=True).returncode == 0
+    except FileNotFoundError:   # no git: nothing to check with
+        return
+    if not applied:
+        sys.exit(f"{SAM3D_OBJECTS_ROOT} is not patched (or carries other changes). Restore it "
+                 "and apply the patch: git -C submodules/sam-3d-objects checkout -- . && "
+                 "git -C submodules/sam-3d-objects apply ../sam-3d-objects.patch "
+                 "(as install.sh does).")
+
+
 @hydra.main(version_base=None,
             config_path=os.path.join(os.path.dirname(os.path.abspath(__file__)), "configs"),
             config_name="genia")
 def main(cfg: DictConfig) -> None:
     """CLI entry point: Hydra composes the config, :func:`run` does the work."""
+    check_backbone()
     run(cfg)
 
 

@@ -9,9 +9,9 @@
     python demo/app.py --work-dir DIR     # uploads and runs (default: results/demo_app)
     python demo/app.py --in-process       # the method in this process (ZeroGPU), no worker
 
-The method it runs is ``demo/method.py``, the one file here that names it (GenIA): its
-modes (``run_demo.py`` settings), run options and steps. Each mode starts from the bundled
-scenes in ``demo/data``; "Add your own" masks an upload with SAM3, by naming the objects or
+The method it runs is ``demo/method.py``, the one file here that names it: its modes
+(``run_demo.py`` settings), run options and choices, and steps. Each mode starts from the
+bundled scenes in ``demo/data``; "Add your own" masks an upload with SAM3, by naming the objects or
 by clicking them on the first view (SAM3 carries the clicks to the other views), and adds it
 to the scenes. **Reconstruct** runs ``demo/run_demo.py``'s recipe on the selected scene,
 ``--low-vram`` included, in a warm worker (``ui/worker.py``): one process that loads the
@@ -19,7 +19,8 @@ method's models as the app starts and keeps them between runs, so a click starts
 reconstructing at once. The 3D view shows the input cameras and depth cloud as soon as
 preprocessing has run, then the reconstruction. For a bundled example with a recorded run
 (``demo/record_examples.py``, into ``<work-dir>/replays``) Reconstruct plays that recording
-instead, in ~15 s and without a GPU, unless **Play recorded runs** is unticked.
+instead, in ~15 s and without a GPU, unless **Play recorded runs** is unticked or a run
+option or choice is off its default.
 
 The layout and the 3D view (3DView, ``submodules/3DView``, built by ``install.sh``) follow the
 GenerativeReconstruction framework's demo app; the look is 3DView's own (``demo/ui/style.py``).
@@ -535,13 +536,13 @@ def build_demo(work_dir: Path, dev: bool = False, in_process: bool = False) -> g
         yield scene_dir, scene_list + [scene_dir], *describe(mode, scene_dir)
 
     def recorded(mode, scene_dir):
-        """Whether a bundled example scene has a recording: here, or published (``REMOTE``,
-        fetched when first played)."""
+        """Whether a bundled example scene has a recording: here, or published (the method's
+        ``REPLAYS_URL``, fetched when first played)."""
         if not scene_dir or Path(scene_dir).parent != DATA / mode:
             return False
         scene = Path(scene_dir).name
         return bool(replay_mod.recording(replay_root, mode, scene)
-                    or replay_mod.is_published(mode, scene))
+                    or replay_mod.is_published(mode, scene, method.REPLAYS_URL))
 
     def select_scene(mode, scene_dir):
         return scene_dir, *describe(mode, scene_dir), recorded_box(mode, scene_dir)
@@ -565,13 +566,19 @@ def build_demo(work_dir: Path, dev: bool = False, in_process: bool = False) -> g
         run_dir.parent.mkdir(parents=True, exist_ok=True)   # the log and manifest sit beside it
         return run_dir
 
-    def run(mode, scene_dir, play, low_vram, extra, *ticked):
+    def run(mode, scene_dir, play, low_vram, extra, *controls):
         """Reconstruct the selected scene, streaming ``[log, status, table, files, viewer, task
         bars]``: a bundled example with a recorded run plays it when ``play`` (the panel's
-        "Play recorded runs" box) is ticked, without a GPU; anything else runs live."""
+        "Play recorded runs" box) is ticked and every control is at its default (what it was
+        recorded with), without a GPU; anything else runs live. ``controls``: the option
+        boxes, then the choice menus."""
         if not scene_dir:
             raise gr.Error("Select or add a scene first.")
-        if play and recorded(mode, scene_dir):
+        ticked, picked = controls[:len(method.OPTIONS)], controls[len(method.OPTIONS):]
+        menus = [names for _, _, names in method.choices(mode)]
+        default = not any(ticked) and all(pick == next(iter(names))
+                                          for pick, names in zip(picked, menus))
+        if play and default and recorded(mode, scene_dir):
             yield from replay(mode, scene_dir)
             return
         if gpu := gpu_error():
@@ -586,6 +593,7 @@ def build_demo(work_dir: Path, dev: bool = False, in_process: bool = False) -> g
                 {"auto": auto_low_vram, "on": True, "off": False}[low_vram],
                 [*(arg for on, (_, _, yes, no) in zip(ticked, method.OPTIONS)
                    for arg in (yes if on else no)),
+                 *(arg for pick, names in zip(picked, menus) for arg in names[pick]),
                  *method.RUN_ARGS, *runner.warm, f"output.output_dir={run_dir}",
                  *shlex.split(extra or "")])
         except ValueError as exc:
@@ -606,10 +614,15 @@ def build_demo(work_dir: Path, dev: bool = False, in_process: bool = False) -> g
         if root is None:
             yield gr.skip(), "⬇ Fetching this example's recorded run…", *[gr.skip()] * 4
             try:
-                root = replay_mod.fetch(replay_root, mode, scene)
+                root = replay_mod.fetch(replay_root, mode, scene, method.REPLAYS_URL)
             except OSError as exc:
-                raise gr.Error(f"Could not fetch the recorded run ({exc}): untick "
-                               "**Play recorded runs** to reconstruct it live.") from None
+                root = None
+                why = f" ({exc})"
+            else:
+                why = ""
+            if root is None:
+                raise gr.Error(f"Could not fetch the recorded run{why}: untick "
+                               "**Play recorded runs** to reconstruct it live.")
         playback = replaying[mode] = replay_mod.Replay(root)
         note = (f"▶ A recorded run of this example (it took {gc.mmss(playback.live_seconds)} "
                 "live) · untick **Play recorded runs** to reconstruct it again")
@@ -742,11 +755,15 @@ def build_demo(work_dir: Path, dev: bool = False, in_process: bool = False) -> g
                     with gr.Column(elem_classes=["controls-tile"]):
                         options = [gr.Checkbox(label=label, value=False, info=info)
                                    for label, info, *_ in method.OPTIONS]
+                        choices = [gr.Dropdown(list(names), value=next(iter(names)),
+                                               label=label, info=info)
+                                   for label, info, names in method.choices(mode)]
                         play_recorded = gr.Checkbox(
                             label="Play recorded runs", value=True,
                             visible=bool(recorded(mode, first)),
-                            info="This example has a recorded run: Reconstruct plays it (~15 s, "
-                                 "no GPU) instead of running it; untick to run it live.")
+                            info="This example has a recorded run: with the default settings, "
+                                 "Reconstruct plays it (~15 s, no GPU) instead of running it; "
+                                 "untick to run it live.")
                         low_vram = gr.Dropdown(
                             [("Auto (from the free GPU memory)", "auto"), ("On", "on"),
                              ("Off", "off")],
@@ -829,7 +846,7 @@ def build_demo(work_dir: Path, dev: bool = False, in_process: bool = False) -> g
                        outputs=[selected, scene_list, gallery, status]).then(
             functools.partial(recorded_box, mode), inputs=selected, outputs=play_recorded)
         return panel, dict(run=run_btn, stop=stop_btn, handler=functools.partial(run, mode),
-                           inputs=[selected, play_recorded, low_vram, extra, *options],
+                           inputs=[selected, play_recorded, low_vram, extra, *options, *choices],
                            outputs=run_outputs)
 
     first_mode = next(iter(method.MODES))

@@ -2,6 +2,30 @@
 
 Changes since the initial release (October 8, 2026), newest first.
 
+November 25, 2026 (second update)
+
+### Demo 3D view on 3DView 2.0; a clear error for a shadowed SAM 3D Objects
+
+* The demo's 3D view runs 3DView 2.0 (its new interface: icon rail, Scene list, Inspector).
+  The page drives it through 3DView's own configuration and messages instead of its
+  interface's elements.
+* `python -m genia.core` (and so `demo/run_demo.py` and the demo app) stops at once, saying
+  why, when the `sam3d_objects` it would import is not the checkout's patched
+  `submodules/sam-3d-objects`: an unpatched SAM 3D Objects installed in the environment
+  shadows it and fails on `utils3d` imports the patch fixes
+  ([#6](https://github.com/facebookresearch/GenIA/issues/6)).
+* `demo/space/build_zerogpu.py`: the files of a ZeroGPU Space (the app in-process, with prebuilt
+  CUDA wheels), beside the Docker ones.
+
+### Fixes
+
+* A recorded example plays only when every run option is at its default (what it was recorded
+  with); ticking "Full quality" no longer plays the default run's recording.
+* The demo app starts where a `spaces/` folder is on the Python path (a checkout's Space
+  files): ZeroGPU is now told by `spaces.GPU` existing, not by `import spaces` working.
+* `LIDRA_SKIP_INIT` is no longer set anywhere: since the `sam3d_objects` patch (October 28) it
+  changes nothing.
+
 November 25, 2026
 
 ### Demo app: recorded examples for everyone, the 3D view always built

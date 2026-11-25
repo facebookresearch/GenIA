@@ -25,9 +25,6 @@ import warnings
 # torch.cuda imports the deprecated pynvml package — silence its FutureWarning.
 warnings.filterwarnings("ignore", message=r"The pynvml package is deprecated.*")
 
-# Skip sam3d_objects heavyweight initialization (must be set before any utils import)
-os.environ['LIDRA_SKIP_INIT'] = '1'
-
 from genia.core.paths import SAM3D_OBJECTS_ROOT
 
 # Ensure submodules are importable.

@@ -9,6 +9,7 @@ recipe ``ROOT/demo/run_demo.py <mode> --data-root DIR --scene NAME [--low-vram |
 (genia2) gets the app by copying ``app.py`` and ``ui/`` and writing its own version of
 this file.
 """
+import os
 from pathlib import Path
 
 import run_demo   # beside this file: the recipe
@@ -38,6 +39,13 @@ OPTIONS = (
      ["--icp"], []),
 )
 
+
+def choices(mode) -> list:
+    """Run choices shown as menus in ``mode``: (label, info, {choice: arguments added to
+    ``run_demo.py``}), the first choice the default. None here (genia2 offers its backbones)."""
+    return []
+
+
 #: Added to every run. Of the blocks' own outputs (off: ``run_demo.py``'s minimal outputs)
 #: only the 3D view's previews are written (voxel grids, object splats); the rest (renders,
 #: debug plots, metrics) took ~40% of a multi-view run's time.
@@ -50,6 +58,11 @@ RUN_ARGS = ["output.save_previews=true"]
 #: environment variable, read once per process, so the worker always has it.
 ENV = {"GENIA_PROGRESS": "1", "GENIA_LIVE_POSES": "1",
        "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True"}
+
+#: Where the bundled examples' recordings are published (``space/replays_gcs.py push``), fetched
+#: when an example is first played (``GENIA_REPLAYS_URL`` overrides it; empty: none).
+REPLAYS_URL = os.environ.get("GENIA_REPLAYS_URL",
+                             "https://storage.googleapis.com/geniadata/demo/replays").rstrip("/")
 
 #: What the app's worker runs per click, as ``python <ENTRY> <overrides>``.
 ENTRY = "-m genia.core"

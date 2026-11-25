@@ -29,10 +29,15 @@ import method
 
 def gpu(duration):
     """``spaces.GPU(duration=duration)`` on ZeroGPU: the decorated function gets a GPU for
-    ``duration`` seconds (a number, or a callable of its arguments). Elsewhere, nothing."""
+    ``duration`` seconds (a number, or a callable of its arguments). Elsewhere, nothing.
+
+    ZeroGPU is told by ``spaces.GPU`` existing, not by the import working: a ``spaces/`` folder
+    on the path (a checkout's Space files) imports as an empty namespace package."""
     try:
         import spaces
     except ImportError:   # not on ZeroGPU
+        return lambda fn: fn
+    if not hasattr(spaces, "GPU"):   # someone's spaces/ folder, not Hugging Face's package
         return lambda fn: fn
     return spaces.GPU(duration=duration)
 

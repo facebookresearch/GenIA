@@ -20,7 +20,6 @@ import argparse
 import glob as _glob
 import json
 import math
-import os
 import re
 import sys
 import traceback
@@ -30,9 +29,6 @@ from pathlib import Path
 from typing import Any, Callable, Collection, Iterable, Iterator, NamedTuple
 
 import numpy as np
-
-# Skip sam3d_objects heavyweight init (must be set before importing it).
-os.environ.setdefault("LIDRA_SKIP_INIT", "1")
 
 from genia.core.paths import SAM3D_OBJECTS_ROOT  # noqa: E402
 

@@ -7,8 +7,6 @@ pointmap panels and multi-frame summary grids (``emit_sequence_diagnostics``).
 import os
 import sys
 
-os.environ['LIDRA_SKIP_INIT'] = '1'
-
 # APPEND, never insert(0): a ``sam3d_objects`` the host process already placed at
 # the head of sys.path must keep winning, and this module can be imported after
 # that. Prepending would jump ours back in front for every later

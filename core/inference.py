@@ -8,7 +8,6 @@ from genia.core.paths import SAM3D_OBJECTS_ROOT
 if str(SAM3D_OBJECTS_ROOT) not in sys.path:
     sys.path.append(str(SAM3D_OBJECTS_ROOT))
 
-os.environ["LIDRA_SKIP_INIT"] = "true"
 from typing import Union, Optional, List, Callable
 import numpy as np
 from PIL import Image

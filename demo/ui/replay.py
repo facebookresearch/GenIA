@@ -14,8 +14,9 @@ appeared::
 ``record`` makes one from a live run; ``Replay.run`` writes it into a fresh run dir on the
 same schedule, compressed to ``SECONDS``, yielding the output as ``Worker.run`` does, so the
 app follows a replay exactly as it follows a run. ``demo/record_examples.py`` records the
-bundled scenes. The published recordings (``REMOTE``, written by ``demo/space/replays_gcs.py
-push``) are fetched a scene at a time when the app first plays one (``pull``).
+bundled scenes. Published recordings (``demo/space/replays_gcs.py push``; where, the
+method's ``REPLAYS_URL``) are fetched a scene at a time when the app first plays one
+(``fetch``).
 """
 from __future__ import annotations
 
@@ -31,9 +32,6 @@ import time
 import urllib.request
 from pathlib import Path
 
-#: Where the bundled examples' recordings are published (``GENIA_REPLAYS_URL``; empty: none).
-REMOTE = os.environ.get("GENIA_REPLAYS_URL",
-                        "https://storage.googleapis.com/geniadata/demo/replays").rstrip("/")
 #: The published recordings' index: ``{"files": {relative path: size}}``.
 INDEX = "index.json"
 
@@ -64,9 +62,9 @@ def recording(replays: Path, mode: str, scene: str) -> Path | None:
 
 
 @functools.lru_cache(maxsize=None)
-def published(base: str = REMOTE) -> dict:
-    """The published recordings' files, ``{relative path: size}``; empty when there are none
-    or they cannot be reached (asked once per process)."""
+def published(base: str) -> dict:
+    """The recordings published at ``base``, ``{relative path: size}``; empty when ``base`` is,
+    or holds none, or cannot be reached (asked once per process)."""
     if not base:
         return {}
     try:
@@ -76,7 +74,7 @@ def published(base: str = REMOTE) -> dict:
         return {}
 
 
-def is_published(mode: str, scene: str, base: str = REMOTE) -> bool:
+def is_published(mode: str, scene: str, base: str) -> bool:
     return f"{mode}/{scene}/timeline.json" in published(base)
 
 
@@ -102,7 +100,7 @@ def pull(base: str, dest: Path, files: dict, prefix: str = "", workers: int = 16
     return len(todo)
 
 
-def fetch(replays: Path, mode: str, scene: str, base: str = REMOTE) -> Path | None:
+def fetch(replays: Path, mode: str, scene: str, base: str) -> Path | None:
     """``mode``/``scene``'s published recording, downloaded into ``replays``; its local
     recording (None if none is published)."""
     if not is_published(mode, scene, base):

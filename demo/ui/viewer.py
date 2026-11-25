@@ -21,9 +21,8 @@ Five stages, all discovered from the run dir rather than announced by the pipeli
   the objects; the newest replaces the previous one, so it follows the poses as they are
   refined — well before the pipeline's own "final" stage below. An early, deliberately
   provisional-looking preview, not a scored artifact. Superseded, once the splats below
-  land, the same way the depth cloud is (``hideVoxelGrid``, see below) — but it is a
-  *Scene-panel item*, not a 3DView checkbox, so it takes its own hide path (see
-  :func:`_voxel_grid_source` and ``viewer/index.html``).
+  land, the same way the depth cloud is (``hideVoxelGrid``, see below): as a Scene item,
+  hidden by the page with 3DView's ``setItemVisible`` (``viewer/index.html``).
 * **pose cubes** — ``pose_cubes.glb``, each object's pose as its frame's cube with that
   frame's axes, one ``obj_{i}`` node per object that the page moves by the live poses as
   it does the voxel grid's: the pose itself (rotation, translation, scale), as it changes.
@@ -40,9 +39,9 @@ Five stages, all discovered from the run dir rather than announced by the pipeli
 
 The depth cloud is the *input* the splats are reconstructed from, so once they land
 it is only clutter: the manifest's ``hidePoints`` then asks the page to switch the
-cloud off. A display toggle, not a content decision — the points stay loaded, so
-the scene's bounds (hence fit-to-view) and the panel's own Points control are
-unaffected, and the user can switch them back on. ``hideVoxelGrid`` answers the
+cloud off (3DView's ``show.points``). A display toggle, not a content decision — the
+points stay loaded, so the scene's bounds (hence fit-to-view) are unaffected, and the
+user can switch them back on. ``hideVoxelGrid`` answers the
 same question for the voxel-grid preview, on the same trigger (the splats
 landing) — also a display toggle, not a removal: the item stays in the Scene
 panel's list, one click away from being shown again.
@@ -95,9 +94,9 @@ def post_js(payload: str) -> str:
             f"(f) => f.contentWindow?.postMessage({payload}, '*'));")
 
 
-# Show/hide the viewer's own "3DView" panel (its scene-wide display controls).
-# The "Scene" panel — the item list — is never hidden: it is how a visitor sees
-# what got loaded and toggles individual assets.
+# Show/hide the viewer's Display panel (its scene-wide display controls; the page
+# turns `hostUi` into 3DView's `configure`). The Scene panel — the item list — is
+# never hidden: it is how a visitor sees what got loaded and toggles individual assets.
 UI_TOGGLE_JS = "(show) => { %s }" % post_js("{ type: 'hostUi', show }")
 
 # Is that panel shown before anyone touches the checkbox?  Off: the scene is what
@@ -438,8 +437,9 @@ def write_manifest(run_dir: Path, done: bool = False) -> bool:
         # (not replaced — it stays loaded) once the real reconstruction lands.
         "hideVoxelGrid": has_splats,
         # Where the run streams each object's current placement while optimising its pose
-        # (GenIA's live_poses); the page moves the voxel grid's per-object nodes by it.
-        "livePoses": _url(Path(run_dir) / "live_poses.json"),
+        # (the method's live_poses); the page moves the previews by it. Named once the file
+        # exists: a run that never writes it (dynamic) is then not polled for it.
+        "livePoses": _url(poses) if (poses := Path(run_dir) / "live_poses.json").is_file() else None,
     }, separators=(",", ":"))
     path = _manifest_path(run_dir)
     if _PUBLISHED.get(path) != payload:
