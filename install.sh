@@ -82,9 +82,12 @@ pip install --no-deps -e submodules/sam3
 # Register the `genia.core` import path (dependencies are already installed above).
 pip install --no-deps -e .
 
-# The demo app's 3D view (3DView, submodules/3DView): a Three.js bundle built with Node >= 22.
+# The demo app's 3D view (3DView, submodules/3DView): a Three.js bundle built with Node >= 22,
+# which goes into the environment from conda-forge when the system has none.
 VIEWER_BUILD="cd submodules/3DView && npm ci --no-audit --no-fund && npm run build -w @3dview/core && npm run build -w 3dview-demo"
-if command -v npm >/dev/null && [ "$(node -p 'process.versions.node.split(".")[0]')" -ge 22 ]; then
+node_ok() { command -v npm >/dev/null && [ "$(node -p 'process.versions.node.split(".")[0]')" -ge 22 ]; }
+node_ok || conda install -y -c conda-forge "nodejs=22" || true
+if node_ok; then
     (eval "$VIEWER_BUILD")
 else
     echo "NOTE: no Node >= 22, so the demo app's 3D view is not built. Later: ($VIEWER_BUILD)"

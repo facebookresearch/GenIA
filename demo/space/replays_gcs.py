@@ -13,16 +13,16 @@ the index over HTTPS from a publicly readable bucket and downloads each file tha
 missing or whose size differs, so the Space fetches only what changed. Standard library only.
 """
 import argparse
-import concurrent.futures
 import json
-import os
-import shutil
 import subprocess
 import sys
 import urllib.request
 from pathlib import Path
 
-INDEX = "index.json"
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))   # demo/: its ui package
+from ui import replay  # noqa: E402  (standard library only, like this file)
+
+INDEX = replay.INDEX
 
 
 def push(src: Path, dest: str) -> int:
@@ -34,23 +34,11 @@ def push(src: Path, dest: str) -> int:
                            "--delete-unmatched-destination-objects", str(src), dest]).returncode
 
 
-def _fetch(url: str, path: Path) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(path.name + ".part")
-    with urllib.request.urlopen(url, timeout=60) as res, open(tmp, "wb") as f:
-        shutil.copyfileobj(res, f, 1 << 20)
-    os.replace(tmp, path)   # a half-downloaded file is never taken for a whole one
-
-
-def pull(base: str, dest: Path, workers: int = 16) -> int:
+def pull(base: str, dest: Path) -> int:
     with urllib.request.urlopen(f"{base}/{INDEX}", timeout=60) as res:
         files = json.load(res)["files"]
-    todo = [rel for rel, size in files.items()
-            if not (dest / rel).is_file() or (dest / rel).stat().st_size != size]
-    print(f"{len(files)} recorded files, {len(todo)} to fetch "
-          f"({sum(files[r] for r in todo) / 1e6:.0f} MB)", flush=True)
-    with concurrent.futures.ThreadPoolExecutor(workers) as pool:
-        list(pool.map(lambda rel: _fetch(f"{base}/{rel}", dest / rel), todo))
+    print(f"{len(files)} recorded files, {sum(files.values()) / 1e6:.0f} MB", flush=True)
+    replay.pull(base, dest, files)
     return 0
 
 

@@ -2,6 +2,16 @@
 
 Changes since the initial release (October 8, 2026), newest first.
 
+November 25, 2026
+
+### Demo app: recorded examples for everyone, the 3D view always built
+
+* The recorded examples are published, and the app fetches an example's recording the first
+  time it plays it (~50-150 MB; `GENIA_REPLAYS_URL`, empty for none), so **Play recorded runs**
+  works on any install. `demo/record_examples.py` still records them anew.
+* `install.sh` installs Node 22 from conda-forge into the environment when the system has no
+  Node >= 22, so the demo's 3D view is always built.
+
 November 24, 2026
 
 ### Demo app: reconstruct in the browser, and watch it happen

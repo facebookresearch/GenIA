@@ -64,7 +64,7 @@ the step table). Pick a bundled scene, or add your own image or views of a stati
 mask its objects with [SAM3](https://github.com/facebookresearch/sam3) (name them, or click
 them); the reconstruction runs with the same recipe, and its 3D view shows the input cameras
 and depth as soon as preprocessing has run, then the Gaussians. The 3D view is
-[3DView](https://github.com/s-esposito/3DView), built by `install.sh` when Node >= 22 is found.
+[3DView](https://github.com/s-esposito/3DView), built by `install.sh` (with Node 22 from conda-forge when the system has no Node >= 22).
 
 Results are written to `results/`. To run your own data, lay it out like the examples in
 `<dir>/<setting>/<name>/` and pass `--data-root <dir> --scene <name>`. With less than

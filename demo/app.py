@@ -535,10 +535,13 @@ def build_demo(work_dir: Path, dev: bool = False, in_process: bool = False) -> g
         yield scene_dir, scene_list + [scene_dir], *describe(mode, scene_dir)
 
     def recorded(mode, scene_dir):
-        """The recording of a bundled example scene, if there is one."""
+        """Whether a bundled example scene has a recording: here, or published (``REMOTE``,
+        fetched when first played)."""
         if not scene_dir or Path(scene_dir).parent != DATA / mode:
-            return None
-        return replay_mod.recording(replay_root, mode, Path(scene_dir).name)
+            return False
+        scene = Path(scene_dir).name
+        return bool(replay_mod.recording(replay_root, mode, scene)
+                    or replay_mod.is_published(mode, scene))
 
     def select_scene(mode, scene_dir):
         return scene_dir, *describe(mode, scene_dir), recorded_box(mode, scene_dir)
@@ -596,8 +599,18 @@ def build_demo(work_dir: Path, dev: bool = False, in_process: bool = False) -> g
             runner.start()     # warm again for the next click (a no-op if it still is)
 
     def replay(mode, scene_dir):
-        """Play the selected example's recorded run (Stop reaches it through ``replaying``)."""
-        playback = replaying[mode] = replay_mod.Replay(recorded(mode, scene_dir))
+        """Play the selected example's recorded run (Stop reaches it through ``replaying``),
+        fetching a published one first if it is not here yet."""
+        scene = Path(scene_dir).name
+        root = replay_mod.recording(replay_root, mode, scene)
+        if root is None:
+            yield gr.skip(), "⬇ Fetching this example's recorded run…", *[gr.skip()] * 4
+            try:
+                root = replay_mod.fetch(replay_root, mode, scene)
+            except OSError as exc:
+                raise gr.Error(f"Could not fetch the recorded run ({exc}): untick "
+                               "**Play recorded runs** to reconstruct it live.") from None
+        playback = replaying[mode] = replay_mod.Replay(root)
         note = (f"▶ A recorded run of this example (it took {gc.mmss(playback.live_seconds)} "
                 "live) · untick **Play recorded runs** to reconstruct it again")
         try:

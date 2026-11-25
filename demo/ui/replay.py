@@ -14,18 +14,28 @@ appeared::
 ``record`` makes one from a live run; ``Replay.run`` writes it into a fresh run dir on the
 same schedule, compressed to ``SECONDS``, yielding the output as ``Worker.run`` does, so the
 app follows a replay exactly as it follows a run. ``demo/record_examples.py`` records the
-bundled scenes.
+bundled scenes. The published recordings (``REMOTE``, written by ``demo/space/replays_gcs.py
+push``) are fetched a scene at a time when the app first plays one (``pull``).
 """
 from __future__ import annotations
 
+import concurrent.futures
 import fnmatch
+import functools
 import json
 import os
 import shutil
 import signal
 import threading
 import time
+import urllib.request
 from pathlib import Path
+
+#: Where the bundled examples' recordings are published (``GENIA_REPLAYS_URL``; empty: none).
+REMOTE = os.environ.get("GENIA_REPLAYS_URL",
+                        "https://storage.googleapis.com/geniadata/demo/replays").rstrip("/")
+#: The published recordings' index: ``{"files": {relative path: size}}``.
+INDEX = "index.json"
 
 #: What the app reads from a run dir (``fnmatch`` patterns on its relative paths, ``*``
 #: crossing ``/``): the step table's config, the 3D view's sources, the downloads.
@@ -51,6 +61,54 @@ def recording(replays: Path, mode: str, scene: str) -> Path | None:
     """The recording of ``mode``/``scene`` under ``replays``, if there is one."""
     root = replays / mode / scene
     return root if (root / "timeline.json").is_file() else None
+
+
+@functools.lru_cache(maxsize=None)
+def published(base: str = REMOTE) -> dict:
+    """The published recordings' files, ``{relative path: size}``; empty when there are none
+    or they cannot be reached (asked once per process)."""
+    if not base:
+        return {}
+    try:
+        with urllib.request.urlopen(f"{base}/{INDEX}", timeout=10) as res:
+            return json.load(res)["files"]
+    except (OSError, ValueError, KeyError):
+        return {}
+
+
+def is_published(mode: str, scene: str, base: str = REMOTE) -> bool:
+    return f"{mode}/{scene}/timeline.json" in published(base)
+
+
+def _download(url: str, path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".part")
+    with urllib.request.urlopen(url, timeout=60) as res, open(tmp, "wb") as f:
+        shutil.copyfileobj(res, f, 1 << 20)
+    os.replace(tmp, path)   # a half-downloaded file is never taken for a whole one
+
+
+def pull(base: str, dest: Path, files: dict, prefix: str = "", workers: int = 16) -> int:
+    """Download the published ``files`` under ``prefix`` that ``dest`` lacks or holds at another
+    size; the number fetched. The timeline last, so a recording is whole once it exists."""
+    todo = [rel for rel, size in files.items() if rel.startswith(prefix)
+            and not ((dest / rel).is_file() and (dest / rel).stat().st_size == size)]
+    timelines = [rel for rel in todo if rel.endswith("timeline.json")]
+    rest = [rel for rel in todo if rel not in timelines]
+    with concurrent.futures.ThreadPoolExecutor(workers) as pool:
+        list(pool.map(lambda rel: _download(f"{base}/{rel}", dest / rel), rest))
+    for rel in timelines:
+        _download(f"{base}/{rel}", dest / rel)
+    return len(todo)
+
+
+def fetch(replays: Path, mode: str, scene: str, base: str = REMOTE) -> Path | None:
+    """``mode``/``scene``'s published recording, downloaded into ``replays``; its local
+    recording (None if none is published)."""
+    if not is_published(mode, scene, base):
+        return None
+    pull(base, replays, published(base), prefix=f"{mode}/{scene}/")
+    return recording(replays, mode, scene)
 
 
 def record(chunks, run_dir: Path, out: Path, returncode) -> None:
