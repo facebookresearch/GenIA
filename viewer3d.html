@@ -35,7 +35,9 @@
 
      The asset is fetched by the viewer, so a cross-origin URL (the GCS bucket)
      needs CORS on that bucket. The bundle is loaded from 3DView's own GitHub
-     Pages deployment. -->
+     Pages deployment, pinned to its major version 1 (/v1/dist/webview.js): the
+     unversioned /dist/webview.js follows 3DView's latest release, whose 2.0
+     changed the UI and the keys this page drives (presentationDefaults). -->
 <style>
   html, body { margin: 0; height: 100%; overflow: hidden; background: #fff;
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; }
@@ -63,7 +65,9 @@
 <div id="status">Loading viewer…</div>
 <script>
 (function () {
-  var VIEWER_BUNDLE = 'https://s-esposito.github.io/3DView/dist/webview.js';
+  var VIEWER_BUNDLE = 'https://s-esposito.github.io/3DView/v1/dist/webview.js';
+  // Only until 3DView's Pages publishes /v1/ (a deploy away): the latest is still 1.x then.
+  var VIEWER_BUNDLE_FALLBACK = 'https://s-esposito.github.io/3DView/dist/webview.js';
 
   var q = new URLSearchParams(location.search);
   var assets = q.getAll('asset');
@@ -154,12 +158,16 @@
     }
   };
 
-  var s = document.createElement('script');
-  s.src = VIEWER_BUNDLE;
-  s.onerror = function () {
-    document.getElementById('status').textContent = 'Could not load the 3D viewer (' + VIEWER_BUNDLE + ')';
-  };
-  document.body.appendChild(s);
+  function loadBundle(url, fallback) {
+    var s = document.createElement('script');
+    s.src = url;
+    s.onerror = function () {
+      if (fallback) return loadBundle(fallback, null);
+      document.getElementById('status').textContent = 'Could not load the 3D viewer (' + url + ')';
+    };
+    document.body.appendChild(s);
+  }
+  loadBundle(VIEWER_BUNDLE, VIEWER_BUNDLE_FALLBACK);
 })();
 </script>
 </body>
