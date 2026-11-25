@@ -58,9 +58,11 @@
 <script>
 (function () {
   var VIEWER_BUNDLE = 'https://s-esposito.github.io/3DView/v2/dist/webview.js';
-  // White, as the page's media tiles; the COLMAP points off: a model shows its cameras.
+  // White, as the page's media tiles; the COLMAP points off: a model shows its cameras. The
+  // footer stays: the frame rate and 3DView's version (a link to it), not its help or theme switch.
   var CONFIG = { preset: 'presentation', theme: 'light', background: '#ffffff',
-                 show: { points: false } };
+                 show: { points: false },
+                 ui: { footer: true, help: false, themeSwitcher: false } };
 
   var q = new URLSearchParams(location.search);
   var assets = q.getAll('asset');
