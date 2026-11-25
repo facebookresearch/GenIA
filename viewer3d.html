@@ -28,16 +28,16 @@
                                                   in the COLMAP frame (3DView's setView; a
                                                   3DView without it ignores the message)
 
-     Presentation defaults: light theme on a white viewport, box / grid / axes /
-     COLMAP points off (a model shows only its camera frustums and images), and
-     the "3DView" display panel hidden. 3DView has no host option for these, so
-     they go through its own UI (see presentationDefaults below and the CSS).
+     The look is 3DView's configuration (CONFIG below): its "presentation"
+     preset (the Scene panel only, with a 4D item's timeline; nothing to select
+     or edit; box / grid / axes off), a light theme on a white viewport, and the
+     COLMAP points off (a model shows only its camera frustums and images).
 
      The asset is fetched by the viewer, so a cross-origin URL (the GCS bucket)
      needs CORS on that bucket. The bundle is loaded from 3DView's own GitHub
-     Pages deployment, pinned to its major version 1 (/v1/dist/webview.js): the
-     unversioned /dist/webview.js follows 3DView's latest release, whose 2.0
-     changed the UI and the keys this page drives (presentationDefaults). -->
+     Pages deployment, pinned to its major version 2 (/v2/dist/webview.js);
+     3DView's embedding API, which this page uses, is documented at
+     https://s-esposito.github.io/3DView/v2/embedding.md -->
 <style>
   html, body { margin: 0; height: 100%; overflow: hidden; background: #fff;
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; }
@@ -51,23 +51,16 @@
     backdrop-filter: blur(12px) saturate(1.3); border: 1px solid rgba(255, 255, 255, .12);
     border-radius: 12px; box-shadow: 0 8px 28px rgba(0, 0, 0, .45); font-size: 13px;
     line-height: 1.5; z-index: 100; pointer-events: none; }
-  /* Hide the "3DView" display panel (the first of the viewer's panels; it is
-     rebuilt on every change, so this has to be a stylesheet rule). The Scene
-     panel stays: it holds a 4D item's timeline. */
-  #viewer-ui > .viewer-panel:first-child { display: none; }
-  /* A white viewport (3DView's light theme is #e8e8e9), matching the page's
-     media tiles. The viewer reads this variable when the theme switches; the
-     extra `html` outranks its own rule, which it injects after this sheet. */
-  html body[data-viewer-theme="light"] { --vscode-editor-background: #fff; }
 </style>
 </head>
 <body>
 <div id="status">Loading viewer…</div>
 <script>
 (function () {
-  var VIEWER_BUNDLE = 'https://s-esposito.github.io/3DView/v1/dist/webview.js';
-  // Only until 3DView's Pages publishes /v1/ (a deploy away): the latest is still 1.x then.
-  var VIEWER_BUNDLE_FALLBACK = 'https://s-esposito.github.io/3DView/dist/webview.js';
+  var VIEWER_BUNDLE = 'https://s-esposito.github.io/3DView/v2/dist/webview.js';
+  // White, as the page's media tiles; the COLMAP points off: a model shows its cameras.
+  var CONFIG = { preset: 'presentation', theme: 'light', background: '#ffffff',
+                 show: { points: false } };
 
   var q = new URLSearchParams(location.search);
   var assets = q.getAll('asset');
@@ -114,30 +107,19 @@
       post(t);
     }
   }
-  function whenSceneHasItem(fn) {
-    var t = setInterval(function () {
-      if (document.querySelector('#viewer-ui .viewer-scene-item')) { clearInterval(t); fn(); }
-    }, 100);
-  }
+  var afterColmap = null;   // what to post once the COLMAP model is in (or failed)
 
-  // The toggles go through their keyboard shortcuts, which flip them; the
-  // viewer keeps no saved state, so each starts on and one press turns it off.
-  // Run before the content arrives, which then adds itself with them off.
-  function presentationDefaults() {
-    var light = document.querySelector('#viewer-ui .viewer-seg-opt[aria-label="Light"]');
-    if (light) light.click();
-    ['b', 'g', 'a', 'p'].forEach(function (key) {
-      window.dispatchEvent(new KeyboardEvent('keydown', { key: key }));
-    });
-  }
-
-  // Must exist before the bundle runs: it reads window.__viewerHost at startup.
-  // Only `ready` needs an answer; the Scene "+" menu (requestAdd) is not
-  // offered, since this host shows only what the page asked for.
+  // Must exist before the bundle runs: it reads window.__viewerHost (and its
+  // config, before the first frame) at startup. The viewer's events arrive here.
   window.__viewerHost = {
+    config: CONFIG,
     postMessage: function (msg) {
+      if ((msg.type === 'itemLoaded' || msg.type === 'itemFailed') && msg.id === 'colmap-0' && afterColmap) {
+        var next = afterColmap;
+        afterColmap = null;
+        next();
+      }
       if (msg.type !== 'ready') return;
-      presentationDefaults();
       // The home view may arrive before the content: the viewer keeps it.
       if (view.length === 6 && view.every(isFinite)) {
         post({ type: 'setView', position: view.slice(0, 3), target: view.slice(3) });
@@ -148,8 +130,8 @@
         // requested, before it loads. So the COLMAP model (cropped to frame
         // the objects, see prepare_gallery3d.py) goes first, the assets once
         // it is in.
+        if (assets.length) afterColmap = postAssets;
         post(loadColmap(colmap));
-        if (assets.length) whenSceneHasItem(postAssets);
       } else if (assets.length) {
         postAssets();
       } else {
@@ -158,16 +140,12 @@
     }
   };
 
-  function loadBundle(url, fallback) {
-    var s = document.createElement('script');
-    s.src = url;
-    s.onerror = function () {
-      if (fallback) return loadBundle(fallback, null);
-      document.getElementById('status').textContent = 'Could not load the 3D viewer (' + url + ')';
-    };
-    document.body.appendChild(s);
-  }
-  loadBundle(VIEWER_BUNDLE, VIEWER_BUNDLE_FALLBACK);
+  var s = document.createElement('script');
+  s.src = VIEWER_BUNDLE;
+  s.onerror = function () {
+    document.getElementById('status').textContent = 'Could not load the 3D viewer (' + VIEWER_BUNDLE + ')';
+  };
+  document.body.appendChild(s);
 })();
 </script>
 </body>
